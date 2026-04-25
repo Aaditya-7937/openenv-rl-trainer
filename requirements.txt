@@ -7,4 +7,3 @@ accelerate
 peft
 bitsandbytes
 gradio
-pyaudioop
