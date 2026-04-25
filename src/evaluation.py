@@ -48,7 +48,9 @@ class Evaluator:
                         "pad_token_id": agent.tokenizer.pad_token_id,
                     }
                     if agent.config.eval_do_sample:
-                        generation_kwargs["temperature"] = agent.config.train_temperature
+                        generation_kwargs["temperature"] = (
+                            agent.config.train_temperature
+                        )
                         generation_kwargs["top_p"] = agent.config.top_p
 
                     output = agent.model.generate(

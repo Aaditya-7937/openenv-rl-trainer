@@ -225,5 +225,7 @@ class RLAgent:
             return
 
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm)
+        torch.nn.utils.clip_grad_norm_(
+            self.model.parameters(), self.config.grad_clip_norm
+        )
         self.optimizer.step()

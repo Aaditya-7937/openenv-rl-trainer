@@ -8,6 +8,7 @@ def _env_bool(name: str, default: bool) -> bool:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
+
 VALID_CLAUSE_TYPES = [
     "indemnification",
     "limitation_of_liability",
