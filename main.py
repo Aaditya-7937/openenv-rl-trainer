@@ -1,4 +1,6 @@
 import os
+import random
+import torch
 from dotenv import load_dotenv
 from src.config import RLConfig
 from src.env_client import EnvironmentClient
@@ -13,7 +15,14 @@ def main():
     if os.path.exists(env_path):
         load_dotenv(env_path)
     config = RLConfig()
-    client = EnvironmentClient(api_url=config.api_url)
+
+    # Reproducibility for easier debugging and fair pre/post comparisons.
+    random.seed(config.seed)
+    torch.manual_seed(config.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(config.seed)
+
+    client = EnvironmentClient(api_url=config.api_url, api_key=config.env_api_key)
     agent = RLAgent(config=config)
     evaluator = Evaluator()
 
@@ -21,6 +30,7 @@ def main():
     print("🚀 OPENENV REINFORCEMENT LEARNING PIPELINE STARTING 🚀")
     print(f"Model: {config.model_name}")
     print(f"Device: {agent.device}")
+    print(f"Seed: {config.seed}")
     print("=" * 60)
 
     # 2. Pre-Training Evaluation: Test untrainned model on 'hard' task

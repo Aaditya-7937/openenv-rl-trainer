@@ -5,9 +5,12 @@ from typing import Dict, Any
 class EnvironmentClient:
     """Interacts with the OpenEnv Space."""
 
-    def __init__(self, api_url: str):
+    def __init__(self, api_url: str, api_key: str | None = None):
         self.api_url = api_url.rstrip("/")
-        self.client = httpx.Client(timeout=30.0)
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        self.client = httpx.Client(timeout=30.0, headers=headers)
 
     def reset(self, task_id: str) -> Dict[str, Any]:
         """Start a new episode for the given task."""

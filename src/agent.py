@@ -26,17 +26,26 @@ class RLAgent:
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Load the base model in bfloat16 to save memory and prevent overflow on modern GPUs
+        # Load the base model in bfloat16 on GPU to save memory.
+        model_kwargs = {
+            "torch_dtype": torch.bfloat16 if self.device == "cuda" else torch.float32,
+            "low_cpu_mem_usage": True,
+            "token": hf_token,
+        }
+        if self.device == "cuda":
+            model_kwargs["device_map"] = "auto"
+
         base_model = AutoModelForCausalLM.from_pretrained(
             config.model_name,
-            torch_dtype=torch.bfloat16 if self.device == "cuda" else torch.float32,
-            low_cpu_mem_usage=True,
-            device_map="auto",
-            token=hf_token,
+            **model_kwargs,
         )
 
-        # Enable gradient checkpointing to drastically reduce memory usage during the forward pass
+        if self.device != "cuda":
+            base_model.to(self.device)
+
+        # Enable gradient checkpointing to reduce memory usage during RL updates.
         base_model.gradient_checkpointing_enable()
+        base_model.config.use_cache = False
 
         try:
             from peft import get_peft_model, LoraConfig, TaskType
@@ -141,15 +150,23 @@ class RLAgent:
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         input_ids = inputs.input_ids
         attention_mask = inputs.attention_mask
+        self.model.train()
+
+        generation_kwargs = {
+            "max_new_tokens": self.config.max_new_tokens,
+            "do_sample": self.config.train_do_sample,
+            "pad_token_id": self.tokenizer.pad_token_id,
+        }
+        if self.config.train_do_sample:
+            generation_kwargs["temperature"] = self.config.train_temperature
+            generation_kwargs["top_p"] = self.config.top_p
 
         # 1. Generate text (without gradients to save memory)
         with torch.no_grad():
             output = self.model.generate(
                 input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=128,
-                do_sample=True,
-                pad_token_id=self.tokenizer.pad_token_id,
+                **generation_kwargs,
             )
 
         # 2. Extract generated tokens
@@ -200,7 +217,13 @@ class RLAgent:
         self.optimizer.zero_grad()
 
         # Negative sign, because PyTorch MINIMIZES loss, but we want to MAXIMIZE reward.
-        loss = -log_prob * torch.tensor(reward, device=self.device)
+        reward_t = torch.tensor(float(reward), device=self.device, dtype=log_prob.dtype)
+        loss = -log_prob * reward_t
+
+        if not torch.isfinite(loss):
+            print(f"[Agent] Skipping non-finite loss: {loss.item()}")
+            return
 
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip_norm)
         self.optimizer.step()

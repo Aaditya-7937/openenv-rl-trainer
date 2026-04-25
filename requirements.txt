@@ -6,4 +6,5 @@ python-dotenv
 accelerate
 peft
 bitsandbytes
-gradio
+fastapi
+uvicorn

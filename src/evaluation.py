@@ -20,43 +20,58 @@ class Evaluator:
         # Tell PyTorch NOT to track gradients (This prevents learning/overfitting)
         import torch
 
-        with torch.no_grad():
-            obs = env_client.reset(task_id)
-            done = False
-            total_reward = 0.0
+        was_training = agent.model.training
+        agent.model.eval()
+        try:
+            with torch.no_grad():
+                obs = env_client.reset(task_id)
+                done = False
+                total_reward = 0.0
 
-            while not done:
-                clause = obs.get("clause_text", "")
-                if not clause:
-                    resp = env_client.step({"action_type": "complete_review"})
-                    done = resp.get("done", True)
-                    score = resp.get("reward", {}).get("score", 0.0)
+                while not done:
+                    clause = obs.get("clause_text", "")
+                    if not clause:
+                        resp = env_client.step({"action_type": "complete_review"})
+                        done = resp.get("done", True)
+                        score = resp.get("reward", {}).get("score", 0.0)
+                        total_reward += score
+                        break
+
+                    prompt = agent.create_prompt(obs)
+                    inputs = agent.tokenizer(prompt, return_tensors="pt").to(
+                        agent.device
+                    )
+
+                    generation_kwargs = {
+                        "max_new_tokens": agent.config.max_new_tokens,
+                        "do_sample": agent.config.eval_do_sample,
+                        "pad_token_id": agent.tokenizer.pad_token_id,
+                    }
+                    if agent.config.eval_do_sample:
+                        generation_kwargs["temperature"] = agent.config.train_temperature
+                        generation_kwargs["top_p"] = agent.config.top_p
+
+                    output = agent.model.generate(
+                        inputs.input_ids,
+                        attention_mask=inputs.attention_mask,
+                        **generation_kwargs,
+                    )
+
+                    generated_text = agent.tokenizer.decode(
+                        output[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
+                    )
+                    action = agent.parse_action(generated_text)
+
+                    result = env_client.step(action)
+                    obs = result.get("observation", {})
+                    score = result.get("reward", {}).get("score", 0.0)
+                    done = result.get("done", False)
+
                     total_reward += score
-                    break
-
-                prompt = agent.create_prompt(obs)
-                inputs = agent.tokenizer(prompt, return_tensors="pt").to(agent.device)
-
-                output = agent.model.generate(
-                    inputs.input_ids,
-                    attention_mask=inputs.attention_mask,
-                    max_new_tokens=128,
-                    do_sample=True,
-                    pad_token_id=agent.tokenizer.pad_token_id,
-                )
-
-                generated_text = agent.tokenizer.decode(
-                    output[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
-                )
-                action = agent.parse_action(generated_text)
-
-                result = env_client.step(action)
-                obs = result.get("observation", {})
-                score = result.get("reward", {}).get("score", 0.0)
-                done = result.get("done", False)
-
-                total_reward += score
-                print(f"Eval Clause Score: {score}")
+                    print(f"Eval Clause Score: {score}")
+        finally:
+            if was_training:
+                agent.model.train()
 
         return total_reward
 
