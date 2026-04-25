@@ -1,0 +1,8 @@
+httpx
+torch
+transformers
+matplotlib
+python-dotenv
+accelerate
+peft
+bitsandbytes
