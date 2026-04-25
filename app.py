@@ -33,4 +33,4 @@ with gr.Blocks() as demo:
     start_btn.click(fn=run_training, inputs=None, outputs=[log_output, plot_output])
 
 if __name__ == '__main__':
-    demo.launch()
+    demo.launch(ssr_mode=False)
