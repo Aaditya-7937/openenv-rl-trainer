@@ -7,9 +7,7 @@ def run_training():
         result = subprocess.run(['python', 'main.py'], capture_output=True, text=True)
         logs = result.stdout
         if result.stderr:
-            logs += '
-Errors/Warnings:
-' + result.stderr
+            logs += '\nErrors/Warnings:\n' + result.stderr
         
         img_path = './results/training_results.png'
         if os.path.exists(img_path):
