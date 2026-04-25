@@ -1,3 +1,14 @@
+---
+title: OpenEnv RL Trainer
+emoji: 🚀
+colorFrom: blue
+colorTo: indigo
+sdk: gradio
+sdk_version: 4.10.0
+app_file: app.py
+pinned: false
+---
+
 # OpenEnv RL Trainer
 
 This folder contains a fully modular, plug-and-play Reinforcement Learning (RL) training pipeline for the OpenEnv Contract Review benchmark.
