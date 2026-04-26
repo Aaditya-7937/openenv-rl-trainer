@@ -134,9 +134,9 @@ def main():
     # 3. Training Loop: Let the model practice on easy/medium tasks and update weights mathematically
     print("\nPhase 2: Reinforcement Learning (PPO/REINFORCE mechanism) with Parallel Processing")
     agent_lock = threading.Lock()
-    
+
     for episode in range(config.total_training_episodes):
-        with ThreadPoolExecutor(max_workers=max(1, len(config.train_tasks))) as executor:
+        with ThreadPoolExecutor(max_workers=max(4, len(config.train_tasks))) as executor:
             futures = [
                 executor.submit(process_task, task_id, episode, config, agent, reward_composer, evaluator, agent_lock)
                 for task_id in config.train_tasks
