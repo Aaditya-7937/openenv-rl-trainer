@@ -137,9 +137,24 @@ class GRPORunner:
             )
 
             rewards: List[float] = []
-            for completion, clause_text, task_id in zip(
-                completions, clause_texts, task_ids
+            parse_fail_count = 0
+            _debug_logged = False  # log first completion in full detail always
+
+            for idx, (completion, clause_text, task_id) in enumerate(
+                zip(completions, clause_texts, task_ids)
             ):
+                # ── Per-completion debug log ──────────────────────────────
+                # Always log the first completion fully; summarise the rest.
+                has_open  = "<analysis>"  in completion
+                has_close = "</analysis>" in completion
+                if not _debug_logged or (not has_close):
+                    print(
+                        f"[Debug][{idx}] len={len(completion)} chars | "
+                        f"<analysis>={has_open} </analysis>={has_close}"
+                    )
+                    print(f"[Debug][{idx}] completion preview: {repr(completion[:400])}")
+                    _debug_logged = True
+
                 try:
                     # Parse LLM output → action dict
                     action = agent.parse_action(completion)
@@ -147,6 +162,7 @@ class GRPORunner:
                     action.pop("_raw_generation", "")  # strip internal tags
 
                     if parse_failed:
+                        parse_fail_count += 1
                         rewards.append(0.0)
                         continue
 
@@ -170,14 +186,15 @@ class GRPORunner:
                     logger.warning(f"[GRPORunner] Reward fn error: {exc}")
                     rewards.append(0.0)
 
-            # Log group reward statistics for monitoring
+            # Log group reward statistics + parse failure rate
             if rewards:
                 mean_r = sum(rewards) / len(rewards)
                 max_r = max(rewards)
                 min_r = min(rewards)
                 print(
                     f"[GRPORunner] Batch rewards — "
-                    f"mean={mean_r:.3f} max={max_r:.3f} min={min_r:.3f}"
+                    f"mean={mean_r:.3f} max={max_r:.3f} min={min_r:.3f} | "
+                    f"parse_failures={parse_fail_count}/{len(rewards)}"
                 )
             return rewards
 
@@ -211,6 +228,14 @@ class GRPORunner:
             f"[GRPORunner] Dataset: {len(dataset)} prompts × "
             f"{self.config.grpo_num_generations} generations = "
             f"{total_rollouts} total rollouts"
+        )
+
+        # ── Startup diagnostic: confirm the token budget that was configured ──
+        print(
+            f"[GRPORunner] Config → max_completion_length={self.config.max_new_tokens} | "
+            f"num_generations={self.config.grpo_num_generations} | "
+            f"lr={self.config.learning_rate} | "
+            f"batch={self.config.grpo_num_generations}×{self.config.grpo_grad_accum_steps}"
         )
 
         # NOTE: TRL ≥0.9 / Unsloth renamed `max_new_tokens` → `max_completion_length`.
