@@ -111,7 +111,16 @@ class RLConfig:
 
     # Generation settings
     max_seq_length: int = int(os.getenv("MAX_SEQ_LENGTH", "2048"))  # required by Unsloth
-    max_new_tokens: int = int(os.getenv("MAX_NEW_TOKENS", "128"))
+    # max_new_tokens MUST be large enough for the model to close </analysis>.
+    # Required minimum breakdown:
+    #   fixed fields (clause_type + risk_level + flags + suggested_action + tags) ≈ 40 tokens
+    #   reasoning at max_reasoning_chars=600 chars ≈ 150 tokens
+    #   total worst-case ≈ 190 tokens  →  512 gives comfortable headroom.
+    #
+    # At 128 tokens every completion was clipped (clipped_ratio=1.0),
+    # parse_action always returned _parse_failed=True, all rewards were 0,
+    # GRPO advantages were all 0, loss was 0, and the model learned nothing.
+    max_new_tokens: int = int(os.getenv("MAX_NEW_TOKENS", "512"))
     train_do_sample: bool = _env_bool("TRAIN_DO_SAMPLE", True)
     eval_do_sample: bool = _env_bool("EVAL_DO_SAMPLE", False)
     train_temperature: float = float(os.getenv("TRAIN_TEMPERATURE", "0.8"))

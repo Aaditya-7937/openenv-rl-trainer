@@ -190,6 +190,10 @@ class RewardComposer:
 
         columns = {
             "env_score": env_score,
+            # success = 1 when the environment positively scores the action.
+            # Monitor this independently from composed_reward; a rising reward
+            # with flat success rate is a strong reward-hacking signal.
+            "success": int(env_score > 0),
             "schema_valid": schema_valid,
             "taxonomy_valid": taxonomy_valid,
             "taxonomy_bonus": taxonomy_bonus,
