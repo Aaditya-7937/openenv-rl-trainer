@@ -40,7 +40,7 @@ VALID_SUGGESTED_ACTIONS = [
 class RLConfig:
     # Environment Settings
     api_url: str = os.getenv(
-        "SPACE_API_URL", "https://kamal1425-trainer.hf.space"
+        "SPACE_API_URL", "https://kamal1425-openenv.hf.space"
     )
 
     # Model Settings (Using a highly capable 7B model that fits on single L4 24GB with LoRA)
