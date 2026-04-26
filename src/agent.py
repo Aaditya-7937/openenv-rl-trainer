@@ -272,24 +272,6 @@ class RLAgent:
 
         return action, total_log_prob, generated_text
 
-<<<<<<< HEAD
-    def update_model(self, log_prob: torch.Tensor, reward: float):
-        """
-        Update the model weights using the REINFORCE policy gradient mechanism.
-        Formula: Loss = -log(pi(a|s)) * (Reward - Baseline)
-        """
-        self.optimizer.zero_grad()
-
-        # Calculate advantage
-        advantage = reward - self.baseline
-        
-        # Update baseline (moving average)
-        self.baseline = (1 - self.baseline_alpha) * self.baseline + self.baseline_alpha * reward
-
-        # Negative sign, because PyTorch MINIMIZES loss, but we want to MAXIMIZE advantage.
-        advantage_t = torch.tensor(float(advantage), device=self.device, dtype=log_prob.dtype)
-        loss = -log_prob * advantage_t
-=======
     # ── Weight update ──────────────────────────────────────────────────────────
     #
     # REINFORCE (update_model_trajectory) has been intentionally removed.
@@ -312,7 +294,6 @@ class RLAgent:
     def compute_grpo_advantages(rewards: List[float]) -> torch.Tensor:
         """
         Compute group-relative advantages for GRPO.
->>>>>>> 7e134d6e79f7e88e0427b50c6613a62e9847fce7
 
         For G completions sampled from the same prompt:
             A_i = (r_i - mean(r_1..r_G)) / (std(r_1..r_G) + eps)
