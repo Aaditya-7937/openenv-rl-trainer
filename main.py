@@ -10,7 +10,51 @@ from src.evaluation import Evaluator
 from src.rewarding import RewardComposer, EpisodeState
 
 
+def _check_gpu_environment() -> None:
+    """
+    Print a clear GPU/CUDA diagnostic at startup.
+
+    Common causes of CPU-only execution in HuggingFace Spaces:
+      1. Space hardware not upgraded to GPU (Settings → Hardware).
+      2. requirements.txt installs CPU-only PyTorch (no CUDA wheel URL).
+      3. CUDA_VISIBLE_DEVICES="" or =-1 env var hides the GPU.
+      4. Unsloth imported after transformers (disables fused kernels).
+    """
+    cuda_available = torch.cuda.is_available()
+    cuda_version   = torch.version.cuda or "None"
+    torch_version  = torch.__version__
+    gpu_name       = torch.cuda.get_device_name(0) if cuda_available else "N/A"
+    gpu_count      = torch.cuda.device_count()
+    cvd            = os.environ.get("CUDA_VISIBLE_DEVICES", "<not set>")
+
+    print("\n" + "=" * 60)
+    print("🔍  GPU / CUDA ENVIRONMENT DIAGNOSTIC")
+    print(f"    torch version      : {torch_version}")
+    print(f"    CUDA available     : {cuda_available}")
+    print(f"    CUDA version       : {cuda_version}")
+    print(f"    GPU count          : {gpu_count}")
+    print(f"    GPU name           : {gpu_name}")
+    print(f"    CUDA_VISIBLE_DEVICES: {cvd}")
+
+    if not cuda_available:
+        print("\n  ⚠️  NO GPU DETECTED — training will be extremely slow on CPU.")
+        print("  Action checklist:")
+        print("    1. Go to your HF Space → Settings → Change hardware to A100 or L4.")
+        print("    2. Check requirements.txt — bare 'torch' installs CPU-only PyTorch.")
+        print("       Add:  --extra-index-url https://download.pytorch.org/whl/cu124")
+        print("             torch==2.6.0")
+        print("    3. Ensure CUDA_VISIBLE_DEVICES is not set to '' or '-1'.")
+    else:
+        print(f"\n  ✅  GPU ready — training will use {gpu_name}.")
+
+    print("=" * 60 + "\n")
+
+
 def main():
+    # 0. GPU environment diagnostic — runs before anything else so any
+    #    CPU-only issue is immediately visible in the logs.
+    _check_gpu_environment()
+
     # 1. Load configuration and initialize components.
     # Use the .env file explicitly located in the current folder (openenv_rl_trainer)
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")

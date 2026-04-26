@@ -1,3 +1,12 @@
+# IMPORTANT: unsloth must be imported before transformers.
+# It monkey-patches HuggingFace attention and MLP layers at import time.
+# Importing transformers first silently disables the fused Triton kernels
+# and causes the UserWarning seen in training logs.
+try:
+    import unsloth  # noqa: F401  # type: ignore
+except ImportError:
+    pass  # Unsloth optional — agent falls back to standard HF+PEFT
+
 import os
 import textwrap
 import torch

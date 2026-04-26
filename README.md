@@ -6,6 +6,7 @@ colorTo: indigo
 sdk: gradio
 python_version: "3.10"
 app_file: app.py
+suggested_hardware: a100-large
 pinned: false
 ---
 
@@ -18,10 +19,9 @@ This folder contains a fully modular, PyTorch-first Reinforcement Learning (RL) 
 | Component | Role |
 |---|---|
 | **OpenEnv** | Standardised environment interface (`/reset`, `/step`, reward signals) |
-| **TRL** (`trl>=0.9.0`) | RL trainers — `GRPOTrainer`, `PPOTrainer`, `SFTTrainer` |
+| **TRL** (`trl>=0.9.0`) | RL trainers — `GRPOTrainer` with group-relative advantage (GRPO) |
 | **Unsloth** | 2× faster training + ~60% VRAM reduction (NF4 quant + fused Triton kernels) |
 | **PEFT / LoRA** | Automatic fallback if Unsloth is unavailable |
-| **PyTorch REINFORCE** | Vanilla policy gradient baseline; ready for GRPO migration |
 
 It is now set up as an RLVR-style pipeline (Reinforcement Learning with Verifiable Rewards):
 - reward is not only one scalar from the environment,
@@ -128,10 +128,13 @@ Use this order to stay aligned with OpenEnv RL best practices:
 - `REWARD_ENV_WEIGHT`, `REWARD_SCHEMA_BONUS`, `REWARD_TAXONOMY_BONUS`, `REWARD_PROCESS_BONUS`
 - `REWARD_REPEAT_PENALTY`, `REWARD_DRIFT_PENALTY`
 - `REWARD_MIN`, `REWARD_MAX`
-- `MIN_REASONING_CHARS`, `MAX_REASONING_CHARS`
+- `MIN_REASONING_CHARS`, `MAX_REASONING_CHARS`, `MIN_GROUNDING_OVERLAP`
 - `REPEATED_ACTION_SOFT_LIMIT`, `REPEATED_ACTION_HARD_LIMIT`
 - `INSPECT_EVERY_N_STEPS`, `WARN_IF_SUSPICIOUS_STEPS`
-- `OPENENV_TIMEOUT_SECONDS`
+- `OPENENV_TIMEOUT_SECONDS`, `EPISODE_TIMEOUT_SECONDS`
+- `MAX_NEW_TOKENS` (default: 512 — must be ≥190 for valid completions)
+- `GRPO_NUM_GENERATIONS`, `GRPO_GRAD_ACCUM_STEPS`, `GRPO_SAMPLES_PER_TASK`
+- `CURRICULUM_UNLOCK_THRESHOLD`, `CURRICULUM_WINDOW`
 
 ## SFT vs RL Rule of Thumb
 
