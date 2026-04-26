@@ -1,7 +1,7 @@
 # ── CUDA-enabled PyTorch (CPU-only torch from PyPI will break Unsloth+TRL) ──
-# Unsloth 2025.11 targets CUDA 12.x + PyTorch 2.x.
-# If your Space runs on CUDA 12.1 change cu124 → cu121 below.
---extra-index-url https://download.pytorch.org/whl/cu124
+# Space runs CUDA 12.3 — use cu121 (compiled for CUDA 12.1, runs on 12.3 drivers).
+# Rule: wheel CUDA version must be <= driver CUDA version.
+--extra-index-url https://download.pytorch.org/whl/cu121
 torch==2.6.0
 torchvision
 torchaudio
