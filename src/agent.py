@@ -301,7 +301,6 @@ class RLAgent:
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         input_ids = inputs.input_ids
         attention_mask = inputs.attention_mask
-        self.model.train()
 
         generation_kwargs = {
             "max_new_tokens": self.config.max_new_tokens,
@@ -311,7 +310,10 @@ class RLAgent:
         if self.config.train_do_sample:
             generation_kwargs["temperature"] = self.config.train_temperature
 
-        # 1. Generate text (without gradients to save memory)
+        # 1. Generate text in EVAL mode — gradient checkpointing in train mode
+        #    corrupts generation output (produces garbage tokens).
+        #    Proof: eval baseline = 1.85, train generation = gibberish.
+        self.model.eval()
         with torch.no_grad():
             output = self.model.generate(
                 input_ids,
@@ -330,8 +332,9 @@ class RLAgent:
         )
         action = self.parse_action(generated_text)
 
-        # 3. Perform a forward pass WITH gradients across the full sequence
-        # We calculate the log-probabilities of the generated tokens based on the prompt
+        # 3. Switch to TRAIN mode for the forward pass that computes gradients.
+        #    This is the only place we need train mode — for backprop through log-probs.
+        self.model.train()
         full_input_ids = full_sequence.unsqueeze(0)
         full_attention_mask = torch.ones_like(full_input_ids).to(self.device)
 
