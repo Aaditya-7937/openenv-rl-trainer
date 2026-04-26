@@ -11,7 +11,17 @@ pinned: false
 
 # OpenEnv RL Trainer
 
-This folder contains a fully modular, PyTorch-first Reinforcement Learning (RL) training pipeline for the OpenEnv Contract Review benchmark.
+This folder contains a fully modular, PyTorch-first Reinforcement Learning (RL) training pipeline for the OpenEnv Contract Review benchmark, built on the **TRL + Unsloth + OpenEnv** hackathon stack.
+
+## Technology Stack
+
+| Component | Role |
+|---|---|
+| **OpenEnv** | Standardised environment interface (`/reset`, `/step`, reward signals) |
+| **TRL** (`trl>=0.9.0`) | RL trainers — `GRPOTrainer`, `PPOTrainer`, `SFTTrainer` |
+| **Unsloth** | 2× faster training + ~60% VRAM reduction (NF4 quant + fused Triton kernels) |
+| **PEFT / LoRA** | Automatic fallback if Unsloth is unavailable |
+| **PyTorch REINFORCE** | Vanilla policy gradient baseline; ready for GRPO migration |
 
 It is now set up as an RLVR-style pipeline (Reinforcement Learning with Verifiable Rewards):
 - reward is not only one scalar from the environment,
@@ -34,10 +44,16 @@ The project is structured using clean Software Design Principles (Separation of 
 ## How to Run
 
 1. **Install requirements:**
-   \`\`\`bash
+   ```bash
    pip install -r requirements.txt
-   \`\`\`
-   *(Note: \`trl\` is removed to avoid version and import conflicts. This project uses vanilla PyTorch Policy Gradients to demonstrate the exact math of RL without dependency bloat.)*
+   ```
+   > **Unsloth note**: Unsloth requires a matching PyTorch + CUDA wheel.
+   > If the default install fails, use the environment-specific wheel:
+   > ```bash
+   > # Example for CUDA 12.1 + PyTorch 2.3
+   > pip install "unsloth[cu121-torch230] @ git+https://github.com/unslothai/unsloth.git"
+   > ```
+   > The agent automatically falls back to standard HF + PEFT LoRA if Unsloth is not available.
 
 2. **Set your environment variables (recommended):**
    Add an \`.env\` file with:

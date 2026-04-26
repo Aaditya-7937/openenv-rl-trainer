@@ -1,9 +1,11 @@
-﻿import os
+import os
 import subprocess
 import sys
 import threading
 from datetime import datetime
 from pathlib import Path
+
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
@@ -15,9 +17,7 @@ RESULTS_DIR = BASE_DIR / "results"
 PLOT_PATH = RESULTS_DIR / "training_results.png"
 METRICS_PATH = RESULTS_DIR / "metrics.json"
 
-app = FastAPI(title="OpenEnv RL Trainer API")
 state_lock = threading.Lock()
-
 state = {
     "running": False,
     "last_started_at": None,
@@ -73,22 +73,24 @@ def _maybe_start_training() -> bool:
     return True
 
 
-@app.on_event("startup")
-def startup():
+@asynccontextmanager
+async def lifespan(app_: FastAPI):
+    """FastAPI lifespan: auto-start training if AUTO_START_TRAINING=true."""
     auto_start = os.getenv("AUTO_START_TRAINING", "false").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
+        "1", "true", "yes", "on",
     }
     if auto_start:
         _maybe_start_training()
+    yield  # application runs here
+
+
+app = FastAPI(title="OpenEnv RL Trainer API", lifespan=lifespan)
 
 
 @app.get("/")
 def dashboard():
-        return HTMLResponse(
-                """
+    return HTMLResponse(
+        """
 <!doctype html>
 <html>
     <head>
@@ -164,7 +166,7 @@ def dashboard():
     </body>
 </html>
 """
-        )
+    )
 
 
 @app.get("/status")
