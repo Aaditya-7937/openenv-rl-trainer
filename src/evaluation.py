@@ -84,7 +84,6 @@ class Evaluator:
                         generation_kwargs["temperature"] = (
                             agent.config.train_temperature
                         )
-                        generation_kwargs["top_p"] = agent.config.top_p
 
                     output = agent.model.generate(
                         inputs.input_ids,

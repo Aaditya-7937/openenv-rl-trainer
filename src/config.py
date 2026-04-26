@@ -44,7 +44,7 @@ class RLConfig:
     )
 
     # Model Settings
-    model_name: str = "google/gemma-4-26B-A4B-it"
+    model_name: str = "google/gemma-2b-it"
 
     # Training Hyperparameters
     learning_rate: float = 1e-5
@@ -57,10 +57,10 @@ class RLConfig:
     total_training_episodes: int = 20  # Keep this low for testing
 
     # Reward shaping and verification (RLVR-style)
-    reward_env_weight: float = float(os.getenv("REWARD_ENV_WEIGHT", "1.0"))
-    reward_schema_bonus: float = float(os.getenv("REWARD_SCHEMA_BONUS", "0.01"))
-    reward_taxonomy_bonus: float = float(os.getenv("REWARD_TAXONOMY_BONUS", "0.01"))
-    reward_process_bonus: float = float(os.getenv("REWARD_PROCESS_BONUS", "0.01"))
+    reward_env_weight: float = float(os.getenv("REWARD_ENV_WEIGHT", "0.6"))
+    reward_schema_bonus: float = float(os.getenv("REWARD_SCHEMA_BONUS", "0.15"))
+    reward_taxonomy_bonus: float = float(os.getenv("REWARD_TAXONOMY_BONUS", "0.15"))
+    reward_process_bonus: float = float(os.getenv("REWARD_PROCESS_BONUS", "0.1"))
     reward_repeat_penalty: float = float(os.getenv("REWARD_REPEAT_PENALTY", "0.12"))
     reward_drift_penalty: float = float(os.getenv("REWARD_DRIFT_PENALTY", "0.35"))
     reward_min: float = float(os.getenv("REWARD_MIN", "-5.0"))
@@ -83,8 +83,7 @@ class RLConfig:
     max_new_tokens: int = int(os.getenv("MAX_NEW_TOKENS", "128"))
     train_do_sample: bool = _env_bool("TRAIN_DO_SAMPLE", True)
     eval_do_sample: bool = _env_bool("EVAL_DO_SAMPLE", False)
-    train_temperature: float = float(os.getenv("TRAIN_TEMPERATURE", "0.8"))
-    top_p: float = float(os.getenv("TOP_P", "0.95"))
+    train_temperature: float = float(os.getenv("TRAIN_TEMPERATURE", "0.7"))
 
     # Optional auth token for protected environment spaces
     env_api_key: str | None = os.getenv("OPENENV_API_KEY")

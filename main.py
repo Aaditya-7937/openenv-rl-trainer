@@ -31,7 +31,7 @@ def process_task(task_id, episode, config, agent, reward_composer, evaluator, ag
 
         # 3b. LLM generates action dict AND we calculate token probabilties for gradient math
         with agent_lock:
-            action, log_probs = agent.generate_and_get_logprobs(prompt)
+            action, log_probs, generated_text = agent.generate_and_get_logprobs(prompt)
 
         # 3c. Send action to OpenEnv and receive reward (This happens in parallel!)
         result = client.step(action)
@@ -48,7 +48,11 @@ def process_task(task_id, episode, config, agent, reward_composer, evaluator, ag
 
         with agent_lock:
             print(
-                f"[Train] Episode {episode+1} | Task: {task_id} | Step {step_count+1} "
+                f"\n[Train] Episode {episode+1} | Task: {task_id} | Step {step_count+1}"
+            )
+            print(f"--- Prompt Sample ---\n{prompt[:150]}...\n---------------------")
+            print(f"--- Output Sample ---\n{generated_text}\n---------------------")
+            print(
                 f"| Reward: {reward:.3f} | Env: {columns['env_score']:.3f} "
                 f"| Pred: {action.get('clause_type')}"
             )

@@ -80,6 +80,9 @@ class RLAgent:
         </analysis>
         """
         ).strip()
+        
+        self.baseline = 0.0
+        self.baseline_alpha = 0.1
 
     def create_prompt(self, obs: Dict[str, Any]) -> str:
         """Create a structured prompt from environment observations."""
@@ -143,9 +146,10 @@ class RLAgent:
 
     def generate_and_get_logprobs(
         self, prompt: str
-    ) -> Tuple[Dict[str, Any], torch.Tensor]:
+    ) -> Tuple[Dict[str, Any], torch.Tensor, str]:
         """
         Generate a text response while computing gradient-tracking log probabilities.
+        Returns (action_dict, log_prob, generated_text)
         """
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         input_ids = inputs.input_ids
@@ -159,7 +163,6 @@ class RLAgent:
         }
         if self.config.train_do_sample:
             generation_kwargs["temperature"] = self.config.train_temperature
-            generation_kwargs["top_p"] = self.config.top_p
 
         # 1. Generate text (without gradients to save memory)
         with torch.no_grad():
@@ -194,7 +197,7 @@ class RLAgent:
         logits = forward_outputs.logits[0, prompt_length - 1 : -1, :]
 
         if len(generated_tokens) == 0:
-            return action, torch.tensor(0.0, device=self.device, requires_grad=True)
+            return action, torch.tensor(0.0, device=self.device, requires_grad=True), generated_text
 
         # Calculate Log Probabilities WITH gradient tracking (grad_fn)
         log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
@@ -207,18 +210,24 @@ class RLAgent:
         # Sum them up
         total_log_prob = token_log_probs.sum()
 
-        return action, total_log_prob
+        return action, total_log_prob, generated_text
 
     def update_model(self, log_prob: torch.Tensor, reward: float):
         """
         Update the model weights using the REINFORCE policy gradient mechanism.
-        Formula: Loss = -log(pi(a|s)) * Reward
+        Formula: Loss = -log(pi(a|s)) * (Reward - Baseline)
         """
         self.optimizer.zero_grad()
 
-        # Negative sign, because PyTorch MINIMIZES loss, but we want to MAXIMIZE reward.
-        reward_t = torch.tensor(float(reward), device=self.device, dtype=log_prob.dtype)
-        loss = -log_prob * reward_t
+        # Calculate advantage
+        advantage = reward - self.baseline
+        
+        # Update baseline (moving average)
+        self.baseline = (1 - self.baseline_alpha) * self.baseline + self.baseline_alpha * reward
+
+        # Negative sign, because PyTorch MINIMIZES loss, but we want to MAXIMIZE advantage.
+        advantage_t = torch.tensor(float(advantage), device=self.device, dtype=log_prob.dtype)
+        loss = -log_prob * advantage_t
 
         if not torch.isfinite(loss):
             print(f"[Agent] Skipping non-finite loss: {loss.item()}")
