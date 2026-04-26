@@ -3,7 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
-from .config import RLConfig, VALID_CLAUSE_TYPES, VALID_RISK_LEVELS, VALID_SUGGESTED_ACTIONS
+from .config import (
+    RLConfig,
+    VALID_CLAUSE_TYPES,
+    VALID_RISK_LEVELS,
+    VALID_SUGGESTED_ACTIONS,
+)
 
 
 @dataclass
@@ -64,7 +69,9 @@ class RewardComposer:
 
         reasoning_len = len(reasoning.strip()) if isinstance(reasoning, str) else 0
         process_valid = int(
-            self.config.min_reasoning_chars <= reasoning_len <= self.config.max_reasoning_chars
+            self.config.min_reasoning_chars
+            <= reasoning_len
+            <= self.config.max_reasoning_chars
             and "no reasoning" not in reasoning.lower()
         )
 
@@ -88,7 +95,10 @@ class RewardComposer:
 
         drift_penalty = 0.0
         suspicious = False
-        if clause_changed and state.consecutive_same_action >= self.config.repeated_action_soft_limit:
+        if (
+            clause_changed
+            and state.consecutive_same_action >= self.config.repeated_action_soft_limit
+        ):
             drift_penalty = self.config.reward_drift_penalty
             suspicious = True
             state.suspicious_step_count += 1
@@ -103,7 +113,9 @@ class RewardComposer:
         )
         reward = max(self.config.reward_min, min(self.config.reward_max, reward))
 
-        force_stop = state.consecutive_same_action >= self.config.repeated_action_hard_limit
+        force_stop = (
+            state.consecutive_same_action >= self.config.repeated_action_hard_limit
+        )
 
         state.previous_action_signature = action_signature
         state.previous_clause_text = current_clause_text
