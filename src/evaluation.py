@@ -14,10 +14,15 @@ class Evaluator:
             "training_rewards": [],
             "training_steps": [],
             "reward_columns_mean": {},
+            "timeout_count": 0,   # episodes terminated by wall-clock guard
         }
 
     def record_training_reward(self, reward: float):
         self.metrics["training_rewards"].append(reward)
+
+    def record_timeout(self):
+        """Call once each time an episode is cut short by the wall-clock guard."""
+        self.metrics["timeout_count"] += 1
 
     def record_training_step(self, row: Dict[str, Any]):
         self.metrics["training_steps"].append(row)
@@ -30,17 +35,24 @@ class Evaluator:
 
         numeric_cols = [
             "env_score",
+            "success",
             "schema_valid",
             "taxonomy_valid",
+            "taxonomy_bonus",
             "process_valid",
+            "grounding_score",
+            "grounding_valid",
             "repeated_penalty",
             "drift_penalty",
+            "collapse_penalty",
             "composed_reward",
         ]
         summary = {}
         for key in numeric_cols:
             values = [float(step.get(key, 0.0)) for step in steps]
             summary[key] = sum(values) / max(len(values), 1)
+        # success_rate: fraction of steps where env_score > 0
+        summary["success_rate"] = summary.get("success", 0.0)
         summary["suspicious_rate"] = sum(
             int(bool(step.get("suspicious", False))) for step in steps
         ) / max(len(steps), 1)
@@ -82,7 +94,7 @@ class Evaluator:
                     }
                     if agent.config.eval_do_sample:
                         generation_kwargs["temperature"] = (
-                            agent.config.train_temperature
+                            agent.config.eval_temperature
                         )
 
                     output = agent.model.generate(
@@ -172,14 +184,15 @@ class Evaluator:
         plt.xlabel("Step")
         plt.ylabel("Reward")
 
-        # 3. Component means for reward debugging
+        # 3. Component means for reward debugging — includes success_rate prominently
+        # (Guideline 15: watch success rate independently from reward)
         summary = self.metrics.get("reward_columns_mean", {})
-        keys = ["env_score", "schema_valid", "taxonomy_valid", "process_valid"]
+        keys = ["success_rate", "env_score", "schema_valid", "taxonomy_valid", "process_valid"]
         vals = [summary.get(k, 0.0) for k in keys]
         plt.subplot(1, 3, 3)
-        plt.bar(keys, vals, color=["#1d4ed8", "#0f766e", "#166534", "#a16207"])
+        plt.bar(keys, vals, color=["#15803d", "#1d4ed8", "#0f766e", "#166534", "#a16207"])
         plt.xticks(rotation=30, ha="right")
-        plt.title("Mean Reward Columns")
+        plt.title("Mean Reward Columns\n(success_rate = env_score>0)")
         plt.ylabel("Mean Value")
 
         plt.tight_layout()

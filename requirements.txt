@@ -1,10 +1,26 @@
-﻿httpx
-torch
-transformers
+# ── PyTorch ──────────────────────────────────────────────────────────────────
+# HF A100 Space actual driver: CUDA 12.9 (not 12.3 — confirmed from error logs)
+# cu128 (12.8) <= 12.9 driver ✓
+# torch 2.7.0+cu128 is a valid unsloth-supported combination ✓
+# A100 is Ampere — requires ampere-specific unsloth kernel path ✓
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.7.0
+
+# ── Unsloth — pinned extra matching torch+cuda+arch ──────────────────────────
+# cu128onlytorch270 installs torch+unsloth together, no conflict
+unsloth[cu128onlytorch270] @ git+https://github.com/unslothai/unsloth.git
+
+# ── Core training stack — versions matching unsloth's pyproject.toml bounds ──
+transformers>=4.51.3,<=5.5.0
+accelerate>=0.34.1
+peft>=0.18.0
+bitsandbytes>=0.45.5,!=0.46.0,!=0.48.0
+trl>=0.18.2,!=0.19.0,<=0.24.0
+datasets>=3.4.1,<4.4.0
+
+# ── App + environment deps ────────────────────────────────────────────────────
+httpx
 matplotlib
 python-dotenv
-accelerate
-peft
-bitsandbytes
 fastapi
 uvicorn

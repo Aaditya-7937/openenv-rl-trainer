@@ -6,12 +6,22 @@ colorTo: indigo
 sdk: gradio
 python_version: "3.10"
 app_file: app.py
+suggested_hardware: a100-large
 pinned: false
 ---
 
 # OpenEnv RL Trainer
 
-This folder contains a fully modular, PyTorch-first Reinforcement Learning (RL) training pipeline for the OpenEnv Contract Review benchmark.
+This folder contains a fully modular, PyTorch-first Reinforcement Learning (RL) training pipeline for the OpenEnv Contract Review benchmark, built on the **TRL + Unsloth + OpenEnv** hackathon stack.
+
+## Technology Stack
+
+| Component | Role |
+|---|---|
+| **OpenEnv** | Standardised environment interface (`/reset`, `/step`, reward signals) |
+| **TRL** (`trl>=0.9.0`) | RL trainers — `GRPOTrainer` with group-relative advantage (GRPO) |
+| **Unsloth** | 2× faster training + ~60% VRAM reduction (NF4 quant + fused Triton kernels) |
+| **PEFT / LoRA** | Automatic fallback if Unsloth is unavailable |
 
 It is now set up as an RLVR-style pipeline (Reinforcement Learning with Verifiable Rewards):
 - reward is not only one scalar from the environment,
@@ -34,10 +44,16 @@ The project is structured using clean Software Design Principles (Separation of 
 ## How to Run
 
 1. **Install requirements:**
-   \`\`\`bash
+   ```bash
    pip install -r requirements.txt
-   \`\`\`
-   *(Note: \`trl\` is removed to avoid version and import conflicts. This project uses vanilla PyTorch Policy Gradients to demonstrate the exact math of RL without dependency bloat.)*
+   ```
+   > **Unsloth note**: Unsloth requires a matching PyTorch + CUDA wheel.
+   > If the default install fails, use the environment-specific wheel:
+   > ```bash
+   > # Example for CUDA 12.1 + PyTorch 2.3
+   > pip install "unsloth[cu121-torch230] @ git+https://github.com/unslothai/unsloth.git"
+   > ```
+   > The agent automatically falls back to standard HF + PEFT LoRA if Unsloth is not available.
 
 2. **Set your environment variables (recommended):**
    Add an \`.env\` file with:
@@ -112,10 +128,13 @@ Use this order to stay aligned with OpenEnv RL best practices:
 - `REWARD_ENV_WEIGHT`, `REWARD_SCHEMA_BONUS`, `REWARD_TAXONOMY_BONUS`, `REWARD_PROCESS_BONUS`
 - `REWARD_REPEAT_PENALTY`, `REWARD_DRIFT_PENALTY`
 - `REWARD_MIN`, `REWARD_MAX`
-- `MIN_REASONING_CHARS`, `MAX_REASONING_CHARS`
+- `MIN_REASONING_CHARS`, `MAX_REASONING_CHARS`, `MIN_GROUNDING_OVERLAP`
 - `REPEATED_ACTION_SOFT_LIMIT`, `REPEATED_ACTION_HARD_LIMIT`
 - `INSPECT_EVERY_N_STEPS`, `WARN_IF_SUSPICIOUS_STEPS`
-- `OPENENV_TIMEOUT_SECONDS`
+- `OPENENV_TIMEOUT_SECONDS`, `EPISODE_TIMEOUT_SECONDS`
+- `MAX_NEW_TOKENS` (default: 512 — must be ≥190 for valid completions)
+- `GRPO_NUM_GENERATIONS`, `GRPO_GRAD_ACCUM_STEPS`, `GRPO_SAMPLES_PER_TASK`
+- `CURRICULUM_UNLOCK_THRESHOLD`, `CURRICULUM_WINDOW`
 
 ## SFT vs RL Rule of Thumb
 
