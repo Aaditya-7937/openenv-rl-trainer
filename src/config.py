@@ -44,7 +44,7 @@ class RLConfig:
     )
 
     # Model Settings
-    model_name: str = "google/gemma-2b-it"
+    model_name: str = "google/gemma-4-26B-A4B-it"
 
     # Training Hyperparameters
     learning_rate: float = 1e-5
