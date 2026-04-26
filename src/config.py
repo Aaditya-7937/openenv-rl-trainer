@@ -40,7 +40,7 @@ VALID_SUGGESTED_ACTIONS = [
 class RLConfig:
     # Environment Settings
     api_url: str = os.getenv(
-        "SPACE_API_URL", "https://aaditya-7937-openenv-review.hf.space"
+        "SPACE_API_URL", "https://kamal1425-trainer.hf.space"
     )
 
     # Model Settings (Using a highly capable 7B model that fits on single L4 24GB with LoRA)
@@ -54,15 +54,15 @@ class RLConfig:
 
     # Episode/Step limits
     max_steps_per_episode: int = 10
-    total_training_episodes: int = 2  # Keep this low for testing
+    total_training_episodes: int = 20  # Keep this low for testing
 
     # Reward shaping and verification (RLVR-style)
     reward_env_weight: float = float(os.getenv("REWARD_ENV_WEIGHT", "1.0"))
-    reward_schema_bonus: float = float(os.getenv("REWARD_SCHEMA_BONUS", "0.1"))
-    reward_taxonomy_bonus: float = float(os.getenv("REWARD_TAXONOMY_BONUS", "0.1"))
-    reward_process_bonus: float = float(os.getenv("REWARD_PROCESS_BONUS", "0.1"))
-    reward_repeat_penalty: float = float(os.getenv("REWARD_REPEAT_PENALTY", "0.2"))
-    reward_drift_penalty: float = float(os.getenv("REWARD_DRIFT_PENALTY", "0.15"))
+    reward_schema_bonus: float = float(os.getenv("REWARD_SCHEMA_BONUS", "0.01"))
+    reward_taxonomy_bonus: float = float(os.getenv("REWARD_TAXONOMY_BONUS", "0.01"))
+    reward_process_bonus: float = float(os.getenv("REWARD_PROCESS_BONUS", "0.01"))
+    reward_repeat_penalty: float = float(os.getenv("REWARD_REPEAT_PENALTY", "0.12"))
+    reward_drift_penalty: float = float(os.getenv("REWARD_DRIFT_PENALTY", "0.35"))
     reward_min: float = float(os.getenv("REWARD_MIN", "-5.0"))
     reward_max: float = float(os.getenv("REWARD_MAX", "5.0"))
 
