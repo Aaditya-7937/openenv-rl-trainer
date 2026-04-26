@@ -10,7 +10,6 @@ from src.evaluation import Evaluator
 from src.rewarding import RewardComposer, EpisodeState
 
 
-<<<<<<< HEAD
 def process_task(task_id, episode, config, agent, reward_composer, evaluator):
     """
     Process a single task episode with proper clause navigation:
@@ -104,46 +103,6 @@ def process_task(task_id, episode, config, agent, reward_composer, evaluator):
 
     avg_reward = sum(episode_rewards) / max(len(episode_rewards), 1)
     print(f"  Episode avg reward: {avg_reward:.3f} over {len(episode_rewards)} steps")
-=======
-def _check_gpu_environment() -> None:
-    """
-    Print a clear GPU/CUDA diagnostic at startup.
-
-    Common causes of CPU-only execution in HuggingFace Spaces:
-      1. Space hardware not upgraded to GPU (Settings → Hardware).
-      2. requirements.txt installs CPU-only PyTorch (no CUDA wheel URL).
-      3. CUDA_VISIBLE_DEVICES="" or =-1 env var hides the GPU.
-      4. Unsloth imported after transformers (disables fused kernels).
-    """
-    cuda_available = torch.cuda.is_available()
-    cuda_version   = torch.version.cuda or "None"
-    torch_version  = torch.__version__
-    gpu_name       = torch.cuda.get_device_name(0) if cuda_available else "N/A"
-    gpu_count      = torch.cuda.device_count()
-    cvd            = os.environ.get("CUDA_VISIBLE_DEVICES", "<not set>")
-
-    print("\n" + "=" * 60)
-    print("🔍  GPU / CUDA ENVIRONMENT DIAGNOSTIC")
-    print(f"    torch version      : {torch_version}")
-    print(f"    CUDA available     : {cuda_available}")
-    print(f"    CUDA version       : {cuda_version}")
-    print(f"    GPU count          : {gpu_count}")
-    print(f"    GPU name           : {gpu_name}")
-    print(f"    CUDA_VISIBLE_DEVICES: {cvd}")
-
-    if not cuda_available:
-        print("\n  ⚠️  NO GPU DETECTED — training will be extremely slow on CPU.")
-        print("  Action checklist:")
-        print("    1. Go to your HF Space → Settings → Change hardware to A100 or L4.")
-        print("    2. Check requirements.txt — bare 'torch' installs CPU-only PyTorch.")
-        print("       Add:  --extra-index-url https://download.pytorch.org/whl/cu124")
-        print("             torch==2.6.0")
-        print("    3. Ensure CUDA_VISIBLE_DEVICES is not set to '' or '-1'.")
-    else:
-        print(f"\n  ✅  GPU ready — training will use {gpu_name}.")
-
-    print("=" * 60 + "\n")
->>>>>>> 7e134d6e79f7e88e0427b50c6613a62e9847fce7
 
 
 def main():
@@ -197,23 +156,6 @@ def main():
     evaluator.metrics["pre_eval"] = baseline_score
     print(f"Baseline Score: {baseline_score}")
 
-<<<<<<< HEAD
-    # 3. Training Loop: Sequential processing with proper clause navigation
-    print("\nPhase 2: Reinforcement Learning (REINFORCE)")
-    for episode in range(config.total_training_episodes):
-        print(f"\n{'─'*50}")
-        print(f"Episode {episode+1}/{config.total_training_episodes}")
-        print(f"{'─'*50}")
-
-        for task_id in config.train_tasks:
-            print(f"\n[Train] Task: {task_id}")
-            try:
-                process_task(
-                    task_id, episode, config, agent, reward_composer, evaluator
-                )
-            except Exception as e:
-                print(f"  [Error] Task {task_id} failed: {e}")
-=======
     # 3. Training Loop
     print("\nPhase 2: Reinforcement Learning")
 
@@ -451,7 +393,6 @@ def main():
                             print(
                                 f"[Curriculum] \U0001f393 Medium tasks UNLOCKED at episode {episode + 1}!"
                             )
->>>>>>> 7e134d6e79f7e88e0427b50c6613a62e9847fce7
 
     # 4. Post-Training Evaluation: Test trained model on 'hard' task again
     print("\nPhase 3: Post-Training Blind Evaluation")
