@@ -2,72 +2,106 @@ import os
 import textwrap
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, List, Tuple
 from .config import RLConfig
 
 
 class RLAgent:
     """
-    An agent that implements a standard Policy Gradient (REINFORCE) algorithm
-    to map textual observations to generative actions and update model weights.
+    Loads an LLM (via Unsloth or standard HF+PEFT), generates clause-level
+    actions with token log-probabilities, and exposes GRPO weight-update logic.
     """
 
     def __init__(self, config: RLConfig):
         self.config = config
         self.device = config.device
-        print(f"[Agent] Loading {config.model_name} onto {self.device}")
-
-        # Optional: Auth token for gated models
         hf_token = os.getenv("HF_TOKEN")
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            config.model_name, token=hf_token
-        )
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        print(f"[Agent] Loading {config.model_name} onto {self.device}")
 
-        # Load the base model in bfloat16 on GPU to save memory.
-        model_kwargs = {
-            "torch_dtype": torch.bfloat16 if self.device == "cuda" else torch.float32,
-            "low_cpu_mem_usage": True,
-            "token": hf_token,
-        }
-        if self.device == "cuda":
-            model_kwargs["device_map"] = "auto"
-
-        base_model = AutoModelForCausalLM.from_pretrained(
-            config.model_name,
-            **model_kwargs,
-        )
-
-        if self.device != "cuda":
-            base_model.to(self.device)
-
-        # Enable gradient checkpointing to reduce memory usage during RL updates.
-        base_model.gradient_checkpointing_enable()
-        base_model.config.use_cache = False
-
+        # ── Path 1: Unsloth ───────────────────────────────────────────────────
+        # Unsloth wraps HuggingFace + PEFT with fused Triton kernels and NF4
+        # 4-bit quantization, giving ~2x training speed and ~60% VRAM savings.
+        # It is the recommended front-end for the TRL + Unsloth + OpenEnv stack.
+        _unsloth_loaded = False
         try:
-            from peft import get_peft_model, LoraConfig, TaskType
+            from unsloth import FastLanguageModel  # type: ignore
 
-            print("[Agent] Applying LoRA (PEFT) to drastically reduce VRAM usage...")
-            peft_config = LoraConfig(
-                task_type=TaskType.CAUSAL_LM,
+            print("[Agent] Unsloth ✓ — 4-bit NF4 loading + fused kernels active.")
+            base_model, self.tokenizer = FastLanguageModel.from_pretrained(
+                model_name=config.model_name,
+                max_seq_length=config.max_seq_length,
+                dtype=None,         # auto-detect bfloat16 / float16
+                load_in_4bit=True,  # NF4 quantization
+                token=hf_token,
+            )
+            # Unsloth's get_peft_model patches attention layers for 2x speed
+            # and sets up gradient checkpointing internally.
+            self.model = FastLanguageModel.get_peft_model(
+                base_model,
                 r=8,
                 lora_alpha=16,
                 lora_dropout=0.05,
+                target_modules=[
+                    "q_proj", "k_proj", "v_proj", "o_proj",
+                    "gate_proj", "up_proj", "down_proj",
+                ],
+                bias="none",
+                use_gradient_checkpointing="unsloth",
+                random_state=config.seed,
             )
-            self.model = get_peft_model(base_model, peft_config)
-            self.model.print_trainable_parameters()
+            _unsloth_loaded = True
         except ImportError:
-            print(
-                "[Agent] 'peft' not installed. Falling back to full model training (Warning: High VRAM needed!)"
-            )
-            self.model = base_model
+            print("[Agent] Unsloth not installed — falling back to standard HF + PEFT.")
+        except Exception as exc:
+            print(f"[Agent] Unsloth failed ({exc}) — falling back to standard HF + PEFT.")
 
+        # ── Path 2: Standard HuggingFace + PEFT LoRA ─────────────────────────
+        if not _unsloth_loaded:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                config.model_name, token=hf_token
+            )
+            model_kwargs: dict = {
+                "torch_dtype": torch.bfloat16 if self.device == "cuda" else torch.float32,
+                "low_cpu_mem_usage": True,
+                "token": hf_token,
+            }
+            if self.device == "cuda":
+                model_kwargs["device_map"] = "auto"
+
+            base_model = AutoModelForCausalLM.from_pretrained(
+                config.model_name, **model_kwargs
+            )
+            if self.device != "cuda":
+                base_model.to(self.device)
+
+            base_model.gradient_checkpointing_enable()
+            base_model.config.use_cache = False
+
+            try:
+                from peft import get_peft_model, LoraConfig, TaskType
+
+                print("[Agent] Applying LoRA (PEFT) to reduce VRAM usage...")
+                peft_config = LoraConfig(
+                    task_type=TaskType.CAUSAL_LM,
+                    r=8,
+                    lora_alpha=16,
+                    lora_dropout=0.05,
+                )
+                self.model = get_peft_model(base_model, peft_config)
+            except ImportError:
+                print("[Agent] peft not installed — using full model (high VRAM).")
+                self.model = base_model
+
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        if hasattr(self.model, "print_trainable_parameters"):
+            self.model.print_trainable_parameters()
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=config.learning_rate
         )
+
 
         self.analysis_template = textwrap.dedent(
             """\
@@ -100,12 +134,20 @@ class RLAgent:
         )
 
     def parse_action(self, generated_text: str) -> Dict[str, Any]:
-        """Parse raw text into JSON action payload."""
+        """
+        Parse raw text into JSON action payload.
+        Returns _parse_failed=True if the LLM hallucinated any field outside
+        the allowed taxonomy. The caller must override reward to 0.0 in that
+        case so that bad outputs receive no positive RL signal.
+        """
         start_tag, end_tag = "<analysis>", "</analysis>"
         start = generated_text.find(start_tag)
         end = generated_text.find(end_tag)
 
-        if start != -1 and end != -1:
+        # If the model did not produce the required XML structure at all, fail immediately.
+        parse_failed = start == -1 or end == -1
+
+        if not parse_failed:
             generated_text = generated_text[start + len(start_tag) : end]
 
         parsed = {}
@@ -120,16 +162,21 @@ class RLAgent:
             VALID_SUGGESTED_ACTIONS,
         )
 
-        c_type = parsed.get("clause_type", "confidentiality")
-        r_level = parsed.get("risk_level", "low")
-        s_action = parsed.get("suggested_action", "accept_as_is")
+        c_type = parsed.get("clause_type", "")
+        r_level = parsed.get("risk_level", "")
+        s_action = parsed.get("suggested_action", "")
 
-        # Fallback protections if the LLM hallucinated outside the taxonomy
+        # Detect any hallucination — mark the parse as failed so the reward
+        # is zeroed out by the caller. Still substitute safe defaults so the
+        # environment call does not crash (we just won't learn from it).
         if c_type not in VALID_CLAUSE_TYPES:
+            parse_failed = True
             c_type = "confidentiality"
         if r_level not in VALID_RISK_LEVELS:
+            parse_failed = True
             r_level = "low"
         if s_action not in VALID_SUGGESTED_ACTIONS:
+            parse_failed = True
             s_action = "accept_as_is"
 
         return {
@@ -139,6 +186,7 @@ class RLAgent:
             "flags": [],
             "suggested_action": s_action,
             "reasoning": parsed.get("reasoning", "No reasoning provided."),
+            "_parse_failed": parse_failed,
         }
 
     def generate_and_get_logprobs(
@@ -179,6 +227,9 @@ class RLAgent:
             generated_tokens, skip_special_tokens=True
         )
         action = self.parse_action(generated_text)
+        # Tag the raw LLM output so the training loop can log it for human inspection.
+        # The caller MUST pop this before sending the action to the environment.
+        action["_raw_generation"] = generated_text[:400]
 
         # 3. Perform a forward pass WITH gradients across the full sequence
         # We calculate the log-probabilities of the generated tokens based on the prompt
@@ -209,23 +260,93 @@ class RLAgent:
 
         return action, total_log_prob
 
-    def update_model(self, log_prob: torch.Tensor, reward: float):
-        """
-        Update the model weights using the REINFORCE policy gradient mechanism.
-        Formula: Loss = -log(pi(a|s)) * Reward
-        """
-        self.optimizer.zero_grad()
+    # ── Weight update ──────────────────────────────────────────────────────────
+    #
+    # REINFORCE (update_model_trajectory) has been intentionally removed.
+    #
+    # Why REINFORCE is inferior for this task:
+    #   • REINFORCE normalises returns across STEPS of the same episode.
+    #     Different steps observe different clauses, so the "baseline" is an
+    #     average over unrelated inputs — a high-variance estimator.
+    #   • GRPO normalises rewards across G COMPLETIONS of the SAME prompt.
+    #     The group mean is a tight, prompt-specific baseline, giving much
+    #     lower gradient variance with no critic network needed.
+    #   • Formula comparison:
+    #       REINFORCE:  A_t = G_t − mean(G_1..G_T)   ← cross-observation noise
+    #       GRPO:       A_i = r_i − mean(r_1..r_G)   ← same-prompt signal
+    #
+    # Both TRL's GRPOTrainer (primary) and update_model_grpo (fallback)
+    # implement the GRPO formula. Do not re-introduce REINFORCE here.
 
-        # Negative sign, because PyTorch MINIMIZES loss, but we want to MAXIMIZE reward.
-        reward_t = torch.tensor(float(reward), device=self.device, dtype=log_prob.dtype)
-        loss = -log_prob * reward_t
+    @staticmethod
+    def compute_grpo_advantages(rewards: List[float]) -> torch.Tensor:
+        """
+        Compute group-relative advantages for GRPO.
 
-        if not torch.isfinite(loss):
-            print(f"[Agent] Skipping non-finite loss: {loss.item()}")
+        For G completions sampled from the same prompt:
+            A_i = (r_i - mean(r_1..r_G)) / (std(r_1..r_G) + eps)
+
+        This normalisation eliminates the need for a separate value/critic
+        network: the group mean acts as the baseline.  When all G rewards are
+        equal (e.g. all 0.0 due to parse failures), advantages collapse to
+        zero and no harmful gradient is applied.
+        """
+        rewards_t = torch.tensor(rewards, dtype=torch.float32)
+        mean_r = rewards_t.mean()
+        std_r = rewards_t.std() if len(rewards) > 1 else torch.tensor(1.0)
+        return (rewards_t - mean_r) / (std_r + 1e-8)
+
+    def update_model_grpo(
+        self, log_probs: List[torch.Tensor], advantages: torch.Tensor
+    ) -> None:
+        """
+        GRPO policy gradient update using group-relative advantages.
+
+        Unlike REINFORCE which weights log-probs by raw discounted returns,
+        GRPO weights them by group-normalised advantages, giving lower variance
+        and no need for a critic network.
+
+        Formula:
+            Loss = -sum_i [ log(pi(a_i | s)) * A_i ]
+                  where A_i = (r_i - mean(r)) / std(r)
+        """
+        if not log_probs:
+            print("[Agent] GRPO: no rollouts to update from — skipping.")
             return
 
+        stacked_log_probs = torch.stack(log_probs)  # shape: (G,)
+        advantages = advantages.to(stacked_log_probs.device)
+
+        loss = -(stacked_log_probs * advantages).sum()
+
+        if not torch.isfinite(loss):
+            print(f"[Agent] GRPO: skipping non-finite loss ({loss.item()}).")
+            return
+
+        self.optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(
             self.model.parameters(), self.config.grad_clip_norm
         )
         self.optimizer.step()
+
+        print(
+            f"[Agent] GRPO update | G={len(log_probs)} "
+            f"| Loss: {loss.item():.4f} "
+            f"| Mean adv: {advantages.mean().item():.4f} "
+            f"| Adv range: [{advantages.min().item():.3f}, {advantages.max().item():.3f}]"
+        )
+
+    def save_checkpoint(self, path: str) -> None:
+        """Persist trainable weights to disk before an episode starts.
+        Used for rollback if suspicious drift is detected after the episode.
+        """
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        torch.save(self.model.state_dict(), path)
+        print(f"[Agent] Checkpoint saved → {path}")
+
+    def load_checkpoint(self, path: str) -> None:
+        """Restore weights saved by save_checkpoint."""
+        state_dict = torch.load(path, map_location=self.device, weights_only=True)
+        self.model.load_state_dict(state_dict)
+        print(f"[Agent] Checkpoint restored ← {path}")

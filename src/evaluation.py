@@ -32,9 +32,13 @@ class Evaluator:
             "env_score",
             "schema_valid",
             "taxonomy_valid",
+            "taxonomy_bonus",
             "process_valid",
+            "grounding_score",
+            "grounding_valid",
             "repeated_penalty",
             "drift_penalty",
+            "collapse_penalty",
             "composed_reward",
         ]
         summary = {}
@@ -82,7 +86,7 @@ class Evaluator:
                     }
                     if agent.config.eval_do_sample:
                         generation_kwargs["temperature"] = (
-                            agent.config.train_temperature
+                            agent.config.eval_temperature
                         )
                         generation_kwargs["top_p"] = agent.config.top_p
 
