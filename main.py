@@ -53,6 +53,8 @@ def process_task(task_id, episode, config, agent, reward_composer, evaluator):
         episode_rewards.append(reward)
 
         # --- 4. Print step details ---
+        # Show raw generation so we can diagnose parse failures / mode collapse
+        gen_preview = generated_text[:200].replace('\n', ' ').strip()
         print(
             f"  Clause {clause_idx+1}/{total_clauses} | "
             f"type={action.get('clause_type')} | "
@@ -60,6 +62,11 @@ def process_task(task_id, episode, config, agent, reward_composer, evaluator):
             f"action={action.get('suggested_action')} | "
             f"reward={reward:.3f} (env={columns['env_score']:.3f})"
         )
+        print(f"    Raw: {gen_preview}")
+        # Show env corrective feedback if any
+        env_feedback = classify_obs.get("corrective_feedback", "")
+        if env_feedback:
+            print(f"    Feedback: {env_feedback[:150]}")
 
         # --- 5. Update model weights (REINFORCE) ---
         agent.update_model(log_probs, reward)

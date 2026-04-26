@@ -44,10 +44,10 @@ class RLConfig:
     )
 
     # Model Settings
-    model_name: str = "google/gemma-4-26B-A4B-it"
+    model_name: str = "mistralai/Mistral-7B-Instruct-v0.3"
 
     # Training Hyperparameters
-    learning_rate: float = 1e-5
+    learning_rate: float = 5e-6  # Lower for 26B model stability with LoRA
     grad_clip_norm: float = 1.0
     # gamma (discount factor) removed — only needed by REINFORCE trajectory returns.
     # GRPO normalises within the group; no cross-step discounting required.
