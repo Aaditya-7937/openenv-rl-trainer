@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Tuple
 
 from .config import (
@@ -17,6 +17,8 @@ class EpisodeState:
     previous_clause_text: str = ""
     consecutive_same_action: int = 0
     suspicious_step_count: int = 0
+    # Track per-clause diversity: how many unique clause_types used this episode
+    clause_types_seen: list = field(default_factory=list)
 
 
 class RewardComposer:
@@ -84,6 +86,10 @@ class RewardComposer:
         current_clause_text = str(observation.get("clause_text", ""))
         clause_changed = current_clause_text != state.previous_clause_text
 
+        # Track clause type diversity
+        if clause_type:
+            state.clause_types_seen.append(clause_type)
+
         if action_signature == state.previous_action_signature:
             state.consecutive_same_action += 1
         else:
@@ -103,6 +109,15 @@ class RewardComposer:
             suspicious = True
             state.suspicious_step_count += 1
 
+        # --- Collapse penalty: extra punishment for always outputting the same
+        # clause_type when the clause text is clearly different ---
+        collapse_penalty = 0.0
+        if len(state.clause_types_seen) >= 3:
+            # If ALL predictions so far are the same type, apply penalty
+            unique_types = set(state.clause_types_seen)
+            if len(unique_types) == 1 and clause_changed:
+                collapse_penalty = 0.15  # Additional penalty for mode collapse
+
         reward = (
             self.config.reward_env_weight * env_score
             + self.config.reward_schema_bonus * schema_valid
@@ -110,6 +125,7 @@ class RewardComposer:
             + self.config.reward_process_bonus * process_valid
             - repeated_penalty
             - drift_penalty
+            - collapse_penalty
         )
         reward = max(self.config.reward_min, min(self.config.reward_max, reward))
 
@@ -127,6 +143,7 @@ class RewardComposer:
             "process_valid": process_valid,
             "repeated_penalty": repeated_penalty,
             "drift_penalty": drift_penalty,
+            "collapse_penalty": collapse_penalty,
             "composed_reward": reward,
             "suspicious": suspicious,
             "consecutive_same_action": state.consecutive_same_action,
