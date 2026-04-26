@@ -213,12 +213,14 @@ class GRPORunner:
             f"{total_rollouts} total rollouts"
         )
 
+        # NOTE: TRL ≥0.9 / Unsloth renamed `max_new_tokens` → `max_completion_length`.
+        # per_device_train_batch_size must be a multiple of num_generations (Unsloth rule).
         grpo_config = GRPOConfig(
             output_dir="./results/grpo_checkpoints",
             num_generations=self.config.grpo_num_generations,
-            max_new_tokens=self.config.max_new_tokens,
+            max_completion_length=self.config.max_new_tokens,
             learning_rate=self.config.learning_rate,
-            per_device_train_batch_size=self.config.grpo_batch_size,
+            per_device_train_batch_size=self.config.grpo_num_generations,  # must be multiple of num_generations
             gradient_accumulation_steps=self.config.grpo_grad_accum_steps,
             num_train_epochs=1,
             max_grad_norm=self.config.grad_clip_norm,
