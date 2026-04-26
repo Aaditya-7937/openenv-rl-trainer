@@ -40,7 +40,7 @@ VALID_SUGGESTED_ACTIONS = [
 class RLConfig:
     # Environment Settings
     api_url: str = os.getenv(
-        "SPACE_API_URL", "https://kamal1425-myspace.hf.space"
+        "SPACE_API_URL", "https://AADITYA-7937-openenv-review.hf.space"
     )
 
     # Model Settings
@@ -60,14 +60,26 @@ class RLConfig:
     total_training_episodes: int = 2  # Keep this low for testing
 
     # GRPO (Group Relative Policy Optimization) settings
-    grpo_group_size: int = int(os.getenv("GRPO_GROUP_SIZE", "4"))  # completions per prompt (generate_group)
-    grpo_num_generations: int = int(os.getenv("GRPO_NUM_GENERATIONS", "4"))  # G for TRL GRPOTrainer / fallback loop
-    grpo_samples_per_task: int = int(os.getenv("GRPO_SAMPLES_PER_TASK", "20"))  # dataset rows per task for TRL
-    grpo_grad_accum_steps: int = int(os.getenv("GRPO_GRAD_ACCUM_STEPS", "2"))  # gradient accumulation
-    grpo_kl_coeff: float = float(os.getenv("GRPO_KL_COEFF", "0.05"))  # KL penalty vs reference
+    grpo_group_size: int = int(
+        os.getenv("GRPO_GROUP_SIZE", "4")
+    )  # completions per prompt (generate_group)
+    grpo_num_generations: int = int(
+        os.getenv("GRPO_NUM_GENERATIONS", "4")
+    )  # G for TRL GRPOTrainer / fallback loop
+    grpo_samples_per_task: int = int(
+        os.getenv("GRPO_SAMPLES_PER_TASK", "20")
+    )  # dataset rows per task for TRL
+    grpo_grad_accum_steps: int = int(
+        os.getenv("GRPO_GRAD_ACCUM_STEPS", "2")
+    )  # gradient accumulation
+    grpo_kl_coeff: float = float(
+        os.getenv("GRPO_KL_COEFF", "0.05")
+    )  # KL penalty vs reference
 
     # Curriculum learning
-    curriculum_unlock_threshold: float = float(os.getenv("CURRICULUM_UNLOCK_THRESHOLD", "0.3"))
+    curriculum_unlock_threshold: float = float(
+        os.getenv("CURRICULUM_UNLOCK_THRESHOLD", "0.3")
+    )
     curriculum_window: int = int(os.getenv("CURRICULUM_WINDOW", "5"))
 
     # Safety
