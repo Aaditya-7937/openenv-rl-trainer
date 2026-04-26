@@ -1,9 +1,11 @@
 # ── PyTorch ──────────────────────────────────────────────────────────────────
-# DO NOT pin torch here.
-# The HuggingFace Unsloth Space image pre-installs torch 2.11.0+cu130 (CUDA-enabled).
-# Pinning a lower version (e.g. 2.6.0) DOWNGRADES torch and breaks torchao,
-# which requires torch.utils._pytree.register_constant (added in torch 2.7.0).
-# Let the container own its torch version.
+# A100 Space has CUDA 12.3 driver. Two hard constraints:
+#   1. Wheel CUDA version must be <= driver version → cu121 (12.1 <= 12.3) ✓
+#      Unpinned unsloth pulls torch 2.11.0+cu130 which needs CUDA 13.0 → fails.
+#   2. torch >= 2.7.0 needed for torch.utils._pytree.register_constant (torchao) ✓
+# torch 2.7.0+cu121 satisfies both.
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.7.0
 
 # ── Core training stack ──────────────────────────────────────────────────────
 transformers>=4.40.0
