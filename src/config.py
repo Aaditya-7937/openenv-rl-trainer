@@ -40,7 +40,7 @@ VALID_SUGGESTED_ACTIONS = [
 class RLConfig:
     # Environment Settings
     api_url: str = os.getenv(
-        "SPACE_API_URL", "https://kamal1425-openenv.hf.space"
+        "SPACE_API_URL", "https://kamal1425-myspace.hf.space"
     )
 
     # Model Settings
