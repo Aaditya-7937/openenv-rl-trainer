@@ -1,142 +1,99 @@
-# IMPORTANT: unsloth must be imported before transformers.
-# It monkey-patches HuggingFace attention and MLP layers at import time.
-# Importing transformers first silently disables the fused Triton kernels
-# and causes the UserWarning seen in training logs.
-try:
-    import unsloth  # noqa: F401  # type: ignore
-except ImportError:
-    pass  # Unsloth optional — agent falls back to standard HF+PEFT
-
 import os
+import re
 import textwrap
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from typing import Dict, Any, List, Tuple
+from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
+from typing import Dict, Any, Tuple, List
 from .config import RLConfig
 
 
 class RLAgent:
     """
-    Loads an LLM (via Unsloth or standard HF+PEFT), generates clause-level
-    actions with token log-probabilities, and exposes GRPO weight-update logic.
+    An agent that implements a standard Policy Gradient (REINFORCE) algorithm
+    to map textual observations to generative actions and update model weights.
     """
 
     def __init__(self, config: RLConfig):
         self.config = config
         self.device = config.device
-        hf_token = os.getenv("HF_TOKEN")
-
         print(f"[Agent] Loading {config.model_name} onto {self.device}")
 
-        # ── Path 1: Unsloth ───────────────────────────────────────────────────
-        # Unsloth wraps HuggingFace + PEFT with fused Triton kernels and NF4
-        # 4-bit quantization, giving ~2x training speed and ~60% VRAM savings.
-        # It is the recommended front-end for the TRL + Unsloth + OpenEnv stack.
-        _unsloth_loaded = False
-        try:
-            from unsloth import FastLanguageModel  # type: ignore
+        # Optional: Auth token for gated models
+        hf_token = os.getenv("HF_TOKEN")
 
-            print("[Agent] Unsloth ✓ — 4-bit NF4 loading + fused kernels active.")
-            base_model, self.tokenizer = FastLanguageModel.from_pretrained(
-                model_name=config.model_name,
-                max_seq_length=config.max_seq_length,
-                dtype=None,  # auto-detect bfloat16 / float16
-                load_in_4bit=True,  # NF4 quantization
-                token=hf_token,
-            )
-            # Unsloth's get_peft_model patches attention layers for 2x speed
-            # and sets up gradient checkpointing internally.
-            self.model = FastLanguageModel.get_peft_model(
-                base_model,
-                r=8,
-                lora_alpha=16,
-                lora_dropout=0.05,
-                target_modules=[
-                    "q_proj",
-                    "k_proj",
-                    "v_proj",
-                    "o_proj",
-                    "gate_proj",
-                    "up_proj",
-                    "down_proj",
-                ],
-                bias="none",
-                use_gradient_checkpointing="unsloth",
-                random_state=config.seed,
-            )
-            _unsloth_loaded = True
-        except ImportError:
-            print("[Agent] Unsloth not installed — falling back to standard HF + PEFT.")
-        except Exception as exc:
-            print(
-                f"[Agent] Unsloth failed ({exc}) — falling back to standard HF + PEFT."
-            )
-
-        # ── Path 2: Standard HuggingFace + PEFT LoRA ─────────────────────────
-        if not _unsloth_loaded:
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                config.model_name, token=hf_token
-            )
-            model_kwargs: dict = {
-                "torch_dtype": (
-                    torch.bfloat16 if self.device == "cuda" else torch.float32
-                ),
-                "low_cpu_mem_usage": True,
-                "token": hf_token,
-            }
-            if self.device == "cuda":
-                model_kwargs["device_map"] = "auto"
-
-            base_model = AutoModelForCausalLM.from_pretrained(
-                config.model_name, **model_kwargs
-            )
-            if self.device != "cuda":
-                base_model.to(self.device)
-
-            base_model.gradient_checkpointing_enable()
-            base_model.config.use_cache = False
-
-            try:
-                from peft import get_peft_model, LoraConfig, TaskType
-
-                print("[Agent] Applying LoRA (PEFT) to reduce VRAM usage...")
-                peft_config = LoraConfig(
-                    task_type=TaskType.CAUSAL_LM,
-                    r=8,
-                    lora_alpha=16,
-                    lora_dropout=0.05,
-                )
-                self.model = get_peft_model(base_model, peft_config)
-            except ImportError:
-                print("[Agent] peft not installed — using full model (high VRAM).")
-                self.model = base_model
-
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            config.model_name, token=hf_token
+        )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        if hasattr(self.model, "print_trainable_parameters"):
+        # Load the base model in bfloat16 on GPU to save memory.
+        model_kwargs = {
+            "torch_dtype": torch.bfloat16 if self.device == "cuda" else torch.float32,
+            "low_cpu_mem_usage": True,
+            "token": hf_token,
+        }
+        if self.device == "cuda":
+            model_kwargs["device_map"] = "auto"
+
+        base_model = AutoModelForCausalLM.from_pretrained(
+            config.model_name,
+            **model_kwargs,
+        )
+
+        if self.device != "cuda":
+            base_model.to(self.device)
+
+        # Enable gradient checkpointing to reduce memory usage during RL updates.
+        base_model.gradient_checkpointing_enable()
+        base_model.config.use_cache = False
+
+        try:
+            from peft import get_peft_model, LoraConfig, TaskType
+
+            print("[Agent] Applying LoRA (PEFT) to drastically reduce VRAM usage...")
+            peft_config = LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                r=8,
+                lora_alpha=16,
+                lora_dropout=0.05,
+            )
+            self.model = get_peft_model(base_model, peft_config)
             self.model.print_trainable_parameters()
+        except ImportError:
+            print(
+                "[Agent] 'peft' not installed. Falling back to full model training (Warning: High VRAM needed!)"
+            )
+            self.model = base_model
+
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=config.learning_rate
         )
 
-        self.analysis_template = textwrap.dedent(
-            """\
-        <analysis>
-        clause_type=
-        risk_level=
-        flags=
-        suggested_action=
-        reasoning=
-        </analysis>
-        """
-        ).strip()
+        # Override the model's built-in generation_config to suppress
+        # "generation flags are not valid: ['top_p', 'top_k']" warnings.
+        # Gemma models bake top_p/top_k into their generation_config.json,
+        # which conflicts with our explicit settings.
+        self.model.generation_config = GenerationConfig(
+            pad_token_id=self.tokenizer.pad_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+            bos_token_id=self.tokenizer.bos_token_id,
+        )
+        print("[Agent] Overrode model generation_config to prevent top_p/top_k conflicts.")
 
         self.baseline = 0.0
         self.baseline_alpha = 0.1
+        self.entropy_coeff = 0.01  # Entropy bonus to encourage exploration
+
+        # Track parse failure rate for monitoring
+        self._parse_attempts = 0
+        self._parse_failures = 0
 
     def create_prompt(self, obs: Dict[str, Any]) -> str:
-        """Create a structured prompt from environment observations."""
+        """
+        Create a structured prompt from environment observations.
+        Uses the tokenizer's chat template for instruction-tuned models.
+        """
         from .config import (
             VALID_CLAUSE_TYPES,
             VALID_RISK_LEVELS,
@@ -144,37 +101,81 @@ class RLAgent:
         )
 
         clause = obs.get("clause_text", "")
-        return (
-            f"TASK: Classify this clause exactly according to the constraints.\n\n"
-            f"CLAUSE: '{clause}'\n\n"
-            f"Allowed clause_type: {', '.join(VALID_CLAUSE_TYPES)}\n"
-            f"Allowed risk_level: {', '.join(VALID_RISK_LEVELS)}\n"
-            f"Allowed suggested_action: {', '.join(VALID_SUGGESTED_ACTIONS)}\n\n"
-            f"TEMPLATE:\n{self.analysis_template}"
+        contract_type = obs.get("contract_type", "Unknown")
+        jurisdiction = obs.get("jurisdiction", "Unknown")
+        parties = obs.get("parties", [])
+        corrective_feedback = obs.get("corrective_feedback", "")
+        last_feedback = obs.get("last_action_feedback", "")
+        clause_idx = obs.get("clause_index", 0)
+        total_clauses = obs.get("total_clauses", 1)
+
+        system_msg = (
+            "You are an expert legal contract reviewer. "
+            "You must classify contract clauses precisely using the given taxonomy. "
+            "Read the clause carefully and identify its TRUE legal nature — "
+            "do NOT default to 'confidentiality' for every clause."
         )
 
+        user_msg = (
+            f"## Contract Context\n"
+            f"- Type: {contract_type}\n"
+            f"- Jurisdiction: {jurisdiction}\n"
+            f"- Parties: {', '.join(parties) if parties else 'N/A'}\n"
+            f"- Clause {clause_idx + 1} of {total_clauses}\n\n"
+            f"## Clause to Classify\n"
+            f'"{clause}"\n\n'
+        )
+
+        if corrective_feedback:
+            user_msg += f"## Feedback from Previous Step\n{corrective_feedback}\n\n"
+        if last_feedback:
+            user_msg += f"## Environment Feedback\n{last_feedback}\n\n"
+
+        user_msg += (
+            f"## Allowed Values\n"
+            f"clause_type: {', '.join(VALID_CLAUSE_TYPES)}\n"
+            f"risk_level: {', '.join(VALID_RISK_LEVELS)}\n"
+            f"suggested_action: {', '.join(VALID_SUGGESTED_ACTIONS)}\n\n"
+            f"## Instructions\n"
+            f"Classify this clause by filling in the template below. "
+            f"Think carefully about what TYPE of clause this is based on its content. "
+            f"For example:\n"
+            f"- Clauses about damages/liability caps → limitation_of_liability\n"
+            f"- Clauses about indemnify/hold harmless → indemnification\n"
+            f"- Clauses about term/renewal/termination → termination\n"
+            f"- Clauses about governing law → governing_law\n"
+            f"- Clauses about insurance coverage → insurance\n"
+            f"- Clauses about representations/warranties → representations or warranty\n"
+            f"- Clauses about force majeure → force_majeure\n"
+            f"- Clauses about assignment → assignment\n"
+            f"- Clauses about confidential information → confidentiality\n\n"
+            f"Respond ONLY with the filled template, nothing else:\n\n"
+            f"<analysis>\n"
+            f"clause_type=YOUR_ANSWER\n"
+            f"risk_level=YOUR_ANSWER\n"
+            f"flags=comma_separated_flags_or_empty\n"
+            f"suggested_action=YOUR_ANSWER\n"
+            f"reasoning=brief explanation of why you chose this classification\n"
+            f"</analysis>"
+        )
+
+        # Use chat template if available (critical for instruction-tuned models)
+        messages = [
+            {"role": "user", "content": f"{system_msg}\n\n{user_msg}"},
+        ]
+
+        try:
+            formatted = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            return formatted
+        except Exception:
+            # Fallback for models without chat template
+            return f"{system_msg}\n\n{user_msg}"
+
     def parse_action(self, generated_text: str) -> Dict[str, Any]:
-        """
-        Parse raw text into JSON action payload.
-        Returns _parse_failed=True if the LLM hallucinated any field outside
-        the allowed taxonomy. The caller must override reward to 0.0 in that
-        case so that bad outputs receive no positive RL signal.
-        """
-        start_tag, end_tag = "<analysis>", "</analysis>"
-        start = generated_text.find(start_tag)
-        end = generated_text.find(end_tag)
-
-        # If the model did not produce the required XML structure at all, fail immediately.
-        parse_failed = start == -1 or end == -1
-
-        if not parse_failed:
-            generated_text = generated_text[start + len(start_tag) : end]
-
-        parsed = {}
-        for line in generated_text.splitlines():
-            if "=" in line:
-                k, v = line.split("=", 1)
-                parsed[k.strip()] = v.strip()
+        """Parse raw text into JSON action payload with detailed logging on failures."""
+        self._parse_attempts += 1
 
         from .config import (
             VALID_CLAUSE_TYPES,
@@ -182,22 +183,88 @@ class RLAgent:
             VALID_SUGGESTED_ACTIONS,
         )
 
+        # Try to extract the <analysis>...</analysis> block
+        start_tag, end_tag = "<analysis>", "</analysis>"
+        start = generated_text.find(start_tag)
+        end = generated_text.find(end_tag)
+
+        parse_region = generated_text
+        if start != -1 and end != -1:
+            parse_region = generated_text[start + len(start_tag) : end]
+
+        # Parse key=value pairs
+        parsed = {}
+        for line in parse_region.splitlines():
+            line = line.strip()
+            if "=" in line:
+                k, v = line.split("=", 1)
+                k = k.strip().lower()
+                v = v.strip().lower()
+                # Clean up common model quirks
+                v = v.strip("'\"` ")
+                parsed[k] = v
+
+        # Also try regex for more flexible parsing (handles "clause_type: value" format)
+        if "clause_type" not in parsed:
+            for pattern_key in ["clause_type", "risk_level", "suggested_action"]:
+                match = re.search(
+                    rf"{pattern_key}\s*[=:]\s*['\"]?(\w+)['\"]?",
+                    generated_text,
+                    re.IGNORECASE,
+                )
+                if match and pattern_key not in parsed:
+                    parsed[pattern_key] = match.group(1).lower()
+
         c_type = parsed.get("clause_type", "")
         r_level = parsed.get("risk_level", "")
         s_action = parsed.get("suggested_action", "")
 
-        # Detect any hallucination — mark the parse as failed so the reward
-        # is zeroed out by the caller. Still substitute safe defaults so the
-        # environment call does not crash (we just won't learn from it).
+        # Track if we had to use defaults (indicates parse failure)
+        used_default = False
+
         if c_type not in VALID_CLAUSE_TYPES:
-            parse_failed = True
-            c_type = "confidentiality"
+            # Try fuzzy matching before giving up
+            c_type_matched = self._fuzzy_match(c_type, VALID_CLAUSE_TYPES)
+            if c_type_matched:
+                c_type = c_type_matched
+            else:
+                if c_type:
+                    print(f"  [Parse] Unknown clause_type '{c_type}', defaulting")
+                else:
+                    print(f"  [Parse] Missing clause_type, defaulting")
+                c_type = "confidentiality"
+                used_default = True
+
         if r_level not in VALID_RISK_LEVELS:
-            parse_failed = True
-            r_level = "low"
+            r_level_matched = self._fuzzy_match(r_level, VALID_RISK_LEVELS)
+            if r_level_matched:
+                r_level = r_level_matched
+            else:
+                if r_level:
+                    print(f"  [Parse] Unknown risk_level '{r_level}', defaulting")
+                r_level = "low"
+                used_default = True
+
         if s_action not in VALID_SUGGESTED_ACTIONS:
-            parse_failed = True
-            s_action = "accept_as_is"
+            s_action_matched = self._fuzzy_match(s_action, VALID_SUGGESTED_ACTIONS)
+            if s_action_matched:
+                s_action = s_action_matched
+            else:
+                if s_action:
+                    print(f"  [Parse] Unknown suggested_action '{s_action}', defaulting")
+                s_action = "accept_as_is"
+                used_default = True
+
+        if used_default:
+            self._parse_failures += 1
+            if self._parse_attempts % 10 == 0:
+                rate = self._parse_failures / self._parse_attempts * 100
+                print(
+                    f"  [Parse Stats] {self._parse_failures}/{self._parse_attempts} "
+                    f"parse failures ({rate:.0f}%)"
+                )
+
+        reasoning = parsed.get("reasoning", "No reasoning provided.")
 
         return {
             "action_type": "classify",
@@ -205,16 +272,165 @@ class RLAgent:
             "risk_level": r_level,
             "flags": [],
             "suggested_action": s_action,
-            "reasoning": parsed.get("reasoning", "No reasoning provided."),
-            "_parse_failed": parse_failed,
+            "reasoning": reasoning,
+        }
+
+    @staticmethod
+    def _fuzzy_match(value: str, valid_options: list) -> str | None:
+        """Try to fuzzy-match a value against valid options."""
+        if not value:
+            return None
+        value = value.lower().strip()
+        # Direct substring match
+        for opt in valid_options:
+            if value in opt or opt in value:
+                return opt
+        # Try replacing common separators
+        normalized = value.replace(" ", "_").replace("-", "_")
+        if normalized in valid_options:
+            return normalized
+        return None
+
+    def generate_group(
+        self, prompt: str
+    ) -> List[Tuple[Dict[str, Any], str]]:
+        """
+        Generate G candidate completions for one prompt (the GRPO 'group').
+        Returns list of (action_dict, generated_text) tuples.
+        """
+        G = self.config.grpo_group_size
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        input_ids = inputs.input_ids
+        attention_mask = inputs.attention_mask
+
+        generation_kwargs = {
+            "max_new_tokens": self.config.max_new_tokens,
+            "do_sample": True,
+            "temperature": self.config.train_temperature,
+            "num_return_sequences": G,
+            "pad_token_id": self.tokenizer.pad_token_id,
+        }
+
+        # Generate in eval mode (gradient checkpointing corrupts generation)
+        self.model.eval()
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                **generation_kwargs,
+            )
+
+        prompt_length = input_ids.shape[1]
+        candidates = []
+        for i in range(G):
+            generated_tokens = outputs[i][prompt_length:]
+            text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            action = self.parse_action(text)
+            candidates.append((action, text))
+
+        return candidates
+
+    def grpo_update(
+        self, prompt: str, candidates: List[Tuple[Dict[str, Any], str]],
+        rewards: List[float]
+    ) -> Dict[str, float]:
+        """
+        GRPO policy update: compute group-normalised advantages and update weights.
+
+        Key insight: even when all candidates get the same env score,
+        differences in risk_level, suggested_action, and reasoning quality
+        create reward variance through the reward composer. The group
+        normalisation turns these small differences into meaningful gradients.
+
+        Returns dict with debug info (mean_reward, std_reward, best_reward, etc.)
+        """
+        G = len(candidates)
+        rewards_t = torch.tensor(rewards, dtype=torch.float32)
+
+        # Group-relative advantage normalisation (the core of GRPO)
+        mean_r = rewards_t.mean()
+        std_r = rewards_t.std()
+        if std_r < 1e-8:
+            # All rewards identical — still update via entropy bonus only
+            advantages = torch.zeros(G)
+        else:
+            advantages = (rewards_t - mean_r) / (std_r + 1e-8)
+
+        # Switch to train mode for the gradient computation
+        self.model.train()
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        input_ids = inputs.input_ids
+        prompt_length = input_ids.shape[1]
+
+        total_loss = torch.tensor(0.0, device=self.device)
+        valid_count = 0
+
+        for i, (action, text) in enumerate(candidates):
+            # Re-tokenize the full sequence (prompt + this candidate's output)
+            full_text = prompt + text
+            full_inputs = self.tokenizer(
+                full_text, return_tensors="pt", truncation=True
+            ).to(self.device)
+            full_ids = full_inputs.input_ids[0]
+            generated_tokens = full_ids[prompt_length:]
+
+            if len(generated_tokens) == 0:
+                continue
+
+            # Forward pass with gradients
+            full_attention_mask = torch.ones(1, len(full_ids), device=self.device)
+            outputs = self.model(
+                input_ids=full_ids.unsqueeze(0),
+                attention_mask=full_attention_mask,
+            )
+
+            logits = outputs.logits[0, prompt_length - 1: -1, :]
+            log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+
+            num_gen = min(len(generated_tokens), logits.shape[0])
+            token_log_probs = log_probs[:num_gen].gather(
+                dim=-1, index=generated_tokens[:num_gen].unsqueeze(-1)
+            ).squeeze(-1)
+            mean_log_prob = token_log_probs.sum() / num_gen
+
+            # Policy loss: -advantage * log_prob
+            adv = advantages[i].item()
+            policy_loss = -mean_log_prob * adv
+
+            # Entropy bonus (encourages exploration)
+            probs = torch.nn.functional.softmax(logits[:num_gen], dim=-1)
+            entropy = -(probs * log_probs[:num_gen]).sum(dim=-1).mean()
+
+            total_loss = total_loss + policy_loss - self.entropy_coeff * entropy
+            valid_count += 1
+
+        if valid_count > 0:
+            total_loss = total_loss / valid_count
+
+            if torch.isfinite(total_loss):
+                self.optimizer.zero_grad()
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.config.grad_clip_norm
+                )
+                self.optimizer.step()
+
+        return {
+            "mean_reward": mean_r.item(),
+            "std_reward": std_r.item(),
+            "best_reward": max(rewards),
+            "worst_reward": min(rewards),
+            "loss": total_loss.item() if torch.is_tensor(total_loss) else 0.0,
         }
 
     def generate_and_get_logprobs(
         self, prompt: str
-    ) -> Tuple[Dict[str, Any], torch.Tensor, str]:
+    ) -> Tuple[Dict[str, Any], torch.Tensor]:
         """
-        Generate a text response while computing gradient-tracking log probabilities.
-        Returns (action_dict, log_prob, generated_text)
+        Generate a SINGLE text response and compute its log-probability.
+        Used by the fallback PyTorch-native GRPO loop in main.py.
+        Returns (action_dict, log_prob_tensor).
+        The action_dict includes '_parse_failed' and '_raw_generation' keys.
         """
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         input_ids = inputs.input_ids
@@ -222,13 +438,12 @@ class RLAgent:
 
         generation_kwargs = {
             "max_new_tokens": self.config.max_new_tokens,
-            "do_sample": self.config.train_do_sample,
+            "do_sample": True,
+            "temperature": self.config.train_temperature,
             "pad_token_id": self.tokenizer.pad_token_id,
         }
-        if self.config.train_do_sample:
-            generation_kwargs["temperature"] = self.config.train_temperature
 
-        # 1. Generate text in EVAL mode (dropout OFF for coherent output)
+        # Generate in eval mode (gradient checkpointing corrupts generation)
         self.model.eval()
         with torch.no_grad():
             output = self.model.generate(
@@ -237,22 +452,24 @@ class RLAgent:
                 **generation_kwargs,
             )
 
-        # 2. Extract generated tokens
         full_sequence = output[0]
         prompt_length = input_ids.shape[1]
         generated_tokens = full_sequence[prompt_length:]
 
-        # Parse the plain text action
         generated_text = self.tokenizer.decode(
             generated_tokens, skip_special_tokens=True
         )
         action = self.parse_action(generated_text)
-        # Tag the raw LLM output so the training loop can log it for human inspection.
-        # The caller MUST pop this before sending the action to the environment.
-        action["_raw_generation"] = generated_text[:400]
 
-        # 3. Switch to TRAIN mode, then perform a forward pass WITH gradients
-        # We calculate the log-probabilities of the generated tokens based on the prompt
+        # Annotate action with parse metadata for the GRPO loop
+        action["_raw_generation"] = generated_text
+        action["_parse_failed"] = (
+            action.get("clause_type") == "confidentiality"
+            and generated_text
+            and "<analysis>" not in generated_text
+        )
+
+        # Compute log-prob with gradients
         self.model.train()
         full_input_ids = full_sequence.unsqueeze(0)
         full_attention_mask = torch.ones_like(full_input_ids).to(self.device)
@@ -261,173 +478,123 @@ class RLAgent:
             input_ids=full_input_ids, attention_mask=full_attention_mask
         )
 
-        # 4. Extract logits specifically for the newly generated tokens
-        # The logits at index `i` predict the token at index `i+1`
-        logits = forward_outputs.logits[0, prompt_length - 1 : -1, :]
+        logits = forward_outputs.logits[0, prompt_length - 1: -1, :]
+        num_generated = len(generated_tokens)
 
-        if len(generated_tokens) == 0:
-            return (
-                action,
-                torch.tensor(0.0, device=self.device, requires_grad=True),
-                generated_text,
-            )
+        if num_generated == 0:
+            return action, torch.tensor(0.0, device=self.device, requires_grad=True)
 
-        # Calculate Log Probabilities WITH gradient tracking (grad_fn)
         log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-
-        # Gather the log prob of the specific token the model actually generated
         token_log_probs = log_probs.gather(
             dim=-1, index=generated_tokens.unsqueeze(-1)
         ).squeeze(-1)
+        mean_log_prob = token_log_probs.sum() / num_generated
 
-        # Sum them up
-        total_log_prob = token_log_probs.sum()
+        return action, mean_log_prob
 
-        return action, total_log_prob, generated_text
-
-    # ── Weight update ──────────────────────────────────────────────────────────
-    #
-    # REINFORCE (update_model_trajectory) has been intentionally removed.
-    #
-    # Why REINFORCE is inferior for this task:
-    #   • REINFORCE normalises returns across STEPS of the same episode.
-    #     Different steps observe different clauses, so the "baseline" is an
-    #     average over unrelated inputs — a high-variance estimator.
-    #   • GRPO normalises rewards across G COMPLETIONS of the SAME prompt.
-    #     The group mean is a tight, prompt-specific baseline, giving much
-    #     lower gradient variance with no critic network needed.
-    #   • Formula comparison:
-    #       REINFORCE:  A_t = G_t − mean(G_1..G_T)   ← cross-observation noise
-    #       GRPO:       A_i = r_i − mean(r_1..r_G)   ← same-prompt signal
-    #
-    # Both TRL's GRPOTrainer (primary) and update_model_grpo (fallback)
-    # implement the GRPO formula. Do not re-introduce REINFORCE here.
-
-    @staticmethod
-    def compute_grpo_advantages(rewards: List[float]) -> torch.Tensor:
+    def compute_grpo_advantages(self, rewards: List[float]) -> torch.Tensor:
         """
-        Compute group-relative advantages for GRPO.
-
-        For G completions sampled from the same prompt:
-            A_i = (r_i - mean(r_1..r_G)) / (std(r_1..r_G) + eps)
-
-        This normalisation eliminates the need for a separate value/critic
-        network: the group mean acts as the baseline.  When all G rewards are
-        equal (e.g. all 0.0 due to parse failures), advantages collapse to
-        zero and no harmful gradient is applied.
+        Compute group-relative advantages for a batch of rewards.
+        A_i = (r_i - mean(r)) / (std(r) + eps)
         """
         rewards_t = torch.tensor(rewards, dtype=torch.float32)
         mean_r = rewards_t.mean()
-        std_r = rewards_t.std() if len(rewards) > 1 else torch.tensor(1.0)
+        std_r = rewards_t.std()
+        if std_r < 1e-8:
+            return torch.zeros_like(rewards_t)
         return (rewards_t - mean_r) / (std_r + 1e-8)
 
     def update_model_grpo(
         self, log_probs: List[torch.Tensor], advantages: torch.Tensor
-    ) -> None:
+    ):
         """
-        GRPO policy gradient update using group-relative advantages.
-
-        Unlike REINFORCE which weights log-probs by raw discounted returns,
-        GRPO weights them by group-normalised advantages, giving lower variance
-        and no need for a critic network.
-
-        Formula:
-            Loss = -sum_i [ log(pi(a_i | s)) * A_i ]
-                  where A_i = (r_i - mean(r)) / std(r)
+        Update model weights using pre-computed log-probs and GRPO advantages.
+        Used by the fallback PyTorch-native GRPO loop in main.py.
         """
-        if not log_probs:
-            print("[Agent] GRPO: no rollouts to update from — skipping.")
-            return
-
-        stacked_log_probs = torch.stack(log_probs)  # shape: (G,)
-        advantages = advantages.to(stacked_log_probs.device)
-
-        loss = -(stacked_log_probs * advantages).sum()
-
-        if not torch.isfinite(loss):
-            print(f"[Agent] GRPO: skipping non-finite loss ({loss.item()}).")
-            return
-
         self.optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            self.model.parameters(), self.config.grad_clip_norm
-        )
-        self.optimizer.step()
+        total_loss = torch.tensor(0.0, device=self.device)
+        valid = 0
 
-        print(
-            f"[Agent] GRPO update | G={len(log_probs)} "
-            f"| Loss: {loss.item():.4f} "
-            f"| Mean adv: {advantages.mean().item():.4f} "
-            f"| Adv range: [{advantages.min().item():.3f}, {advantages.max().item():.3f}]"
-        )
+        for lp, adv in zip(log_probs, advantages):
+            if not torch.isfinite(lp):
+                continue
+            total_loss = total_loss + (-lp * adv.item())
+            valid += 1
 
-    def save_checkpoint(self, path: str) -> None:
-        """Persist trainable weights to disk before an episode starts.
-        Used for rollback if suspicious drift is detected after the episode.
-        """
-        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-        torch.save(self.model.state_dict(), path)
-        print(f"[Agent] Checkpoint saved → {path}")
+        if valid > 0:
+            total_loss = total_loss / valid
+            if torch.isfinite(total_loss):
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.config.grad_clip_norm
+                )
+                self.optimizer.step()
 
-    def load_checkpoint(self, path: str) -> None:
-        """Restore weights saved by save_checkpoint."""
-        state_dict = torch.load(path, map_location=self.device, weights_only=True)
-        self.model.load_state_dict(state_dict)
-        print(f"[Agent] Checkpoint restored ← {path}")
+    def save_checkpoint(self, path: str):
+        """Save LoRA adapter weights for rollback."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Save only the trainable (LoRA) parameters
+        trainable_state = {
+            k: v for k, v in self.model.state_dict().items() if v.requires_grad
+        }
+        if not trainable_state:
+            # Fallback: save all named params that require grad
+            trainable_state = {
+                n: p.data for n, p in self.model.named_parameters() if p.requires_grad
+            }
+        torch.save(trainable_state, path)
 
-    def save_final_model(self, output_dir: str) -> None:
-        """
-        Safe post-training adapter export (Guideline 16).
+    def load_checkpoint(self, path: str):
+        """Restore LoRA adapter weights from checkpoint."""
+        if not os.path.exists(path):
+            print(f"[Agent] Checkpoint not found: {path}")
+            return
+        state = torch.load(path, map_location=self.device)
+        missing, unexpected = self.model.load_state_dict(state, strict=False)
+        if missing:
+            print(f"[Agent] Checkpoint load — missing keys: {len(missing)}")
 
-        Uses save_pretrained() which stores ONLY the LoRA adapter deltas in
-        HuggingFace format.  This is correct for both the Unsloth and plain
-        PEFT paths because:
-          • No 4-bit → 16-bit upcasting happens (avoids quality damage).
-          • No merge_and_unload() is called (merge only when explicitly needed
-            for deployment, and only via Unsloth's own safe merge API).
-          • The adapter can be reloaded with `from_pretrained` + `PeftModel`
-            for post-save inference verification.
-
-        Do NOT replace this with torch.save(state_dict()) for the final export;
-        that path is reserved for the mid-training rollback checkpoint only.
-        """
+    def save_final_model(self, output_dir: str):
+        """Save the final trained LoRA adapter."""
         os.makedirs(output_dir, exist_ok=True)
-        self.model.save_pretrained(output_dir)
-        self.tokenizer.save_pretrained(output_dir)
-        print(f"[Agent] Final adapter saved → {output_dir}")
-        print(f"[Agent] Reload with: PeftModel.from_pretrained(base, '{output_dir}')")
+        try:
+            self.model.save_pretrained(output_dir)
+            self.tokenizer.save_pretrained(output_dir)
+            print(f"[Agent] Saved adapter to {output_dir}")
+        except Exception as e:
+            print(f"[Agent] save_pretrained failed: {e}")
+            # Fallback: save state dict
+            torch.save(
+                {n: p.data for n, p in self.model.named_parameters() if p.requires_grad},
+                os.path.join(output_dir, "adapter_state.pt"),
+            )
+            print(f"[Agent] Saved state dict fallback to {output_dir}/adapter_state.pt")
 
-    def inference_sanity_check(self, sample_clause: str) -> str:
-        """
-        Post-training inference check (Guideline 16).
-
-        Runs a single greedy forward pass on a known clause immediately after
-        training to confirm the saved model can still generate coherent output.
-        A broken merge / corrupt save will surface here rather than at deploy time.
-        """
-        obs = {"clause_text": sample_clause}
+    def inference_sanity_check(self, sample_clause: str):
+        """Quick check that the model can still generate after training."""
+        obs = {
+            "clause_text": sample_clause,
+            "contract_type": "Service Agreement",
+            "jurisdiction": "New York",
+            "parties": ["Party A", "Party B"],
+            "clause_index": 0,
+            "total_clauses": 1,
+        }
         prompt = self.create_prompt(obs)
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         self.model.eval()
         with torch.no_grad():
+            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
             output = self.model.generate(
                 inputs.input_ids,
                 attention_mask=inputs.attention_mask,
-                max_new_tokens=64,
+                max_new_tokens=self.config.max_new_tokens,
                 do_sample=False,
                 pad_token_id=self.tokenizer.pad_token_id,
             )
-        generated = self.tokenizer.decode(
-            output[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
+        text = self.tokenizer.decode(
+            output[0][inputs.input_ids.shape[1]:], skip_special_tokens=True
         )
-        action = self.parse_action(generated)
-        ok = not action.get("_parse_failed", False)
-        print(
-            f"[Agent] Inference sanity check — "
-            f"parse_ok={ok} | clause_type={action.get('clause_type')} "
-            f"| risk_level={action.get('risk_level')}"
-        )
-        print(f"[Agent] Raw output: {repr(generated[:200])}")
-        self.model.train()
-        return generated
+        action = self.parse_action(text)
+        print(f"[Sanity] clause_type={action['clause_type']} risk={action['risk_level']}")
+        print(f"[Sanity] Raw: {text[:200]}")
+
