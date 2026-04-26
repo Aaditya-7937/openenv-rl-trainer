@@ -1,13 +1,23 @@
-httpx
-torch
-transformers
-matplotlib
-python-dotenv
-accelerate
-peft
-bitsandbytes
-fastapi
-uvicorn
+# ── CUDA-enabled PyTorch (CPU-only torch from PyPI will break Unsloth+TRL) ──
+# Unsloth 2025.11 targets CUDA 12.x + PyTorch 2.x.
+# If your Space runs on CUDA 12.1 change cu124 → cu121 below.
+--extra-index-url https://download.pytorch.org/whl/cu124
+torch==2.6.0
+torchvision
+torchaudio
+
+# ── Core training stack ──────────────────────────────────────────────────────
+transformers>=4.40.0
+accelerate>=0.26.0       # required by TRL GRPOTrainer
+peft>=0.10.0
+bitsandbytes>=0.43.0     # required for NF4 4-bit quant on CUDA 12
 trl>=0.9.0
 unsloth
 datasets
+
+# ── App + environment deps ───────────────────────────────────────────────────
+httpx
+matplotlib
+python-dotenv
+fastapi
+uvicorn
