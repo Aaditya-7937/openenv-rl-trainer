@@ -6,6 +6,7 @@ from src.config import RLConfig
 from src.env_client import EnvironmentClient
 from src.agent import RLAgent
 from src.evaluation import Evaluator
+from src.rewarding import RewardComposer, EpisodeState
 
 
 def main():
@@ -25,12 +26,20 @@ def main():
     client = EnvironmentClient(api_url=config.api_url, api_key=config.env_api_key)
     agent = RLAgent(config=config)
     evaluator = Evaluator()
+    reward_composer = RewardComposer(config=config)
 
     print("=" * 60)
     print("🚀 OPENENV REINFORCEMENT LEARNING PIPELINE STARTING 🚀")
     print(f"Model: {config.model_name}")
     print(f"Device: {agent.device}")
     print(f"Seed: {config.seed}")
+    print(
+        "Reward Weights: "
+        f"env={config.reward_env_weight}, "
+        f"schema={config.reward_schema_bonus}, "
+        f"taxonomy={config.reward_taxonomy_bonus}, "
+        f"process={config.reward_process_bonus}"
+    )
     print("=" * 60)
 
     # 2. Pre-Training Evaluation: Test untrainned model on 'hard' task
@@ -46,15 +55,17 @@ def main():
             obs = client.reset(task_id)
             done = False
             step_count = 0
+            state = EpisodeState()
 
             while not done and step_count < config.max_steps_per_episode:
                 clause = obs.get("clause_text", "")
                 if not clause:
-                    resp = client.step({"action_type": "complete_review"})
+                    client.step({"action_type": "complete_review"})
                     break
 
                 # 3a. LLM analyzes the text
                 prompt = agent.create_prompt(obs)
+                current_obs = dict(obs)
 
                 # 3b. LLM generates action dict AND we calculate token probabilties for gradient math
                 action, log_probs = agent.generate_and_get_logprobs(prompt)
@@ -62,17 +73,54 @@ def main():
                 # 3c. Send action to OpenEnv and receive reward
                 result = client.step(action)
                 obs = result.get("observation", {})
-                score = result.get("reward", {}).get("score", 0.0)
                 done = result.get("done", False)
 
-                print(
-                    f"[Train] Episode {episode+1} | Task: {task_id} | Step {step_count+1} | Reward: {score} | Pred: {action.get('clause_type')}"
+                # 3d. Compose reward from independent checks (outcome + process + safety)
+                reward, columns, force_stop = reward_composer.compose(
+                    action=action,
+                    env_result=result,
+                    state=state,
+                    observation=current_obs,
                 )
 
-                # 3d. MATHEMATICAL WEIGHT UPDATE (The actual learning happens here!)
-                if score is not None:
-                    agent.update_model(log_probs, score)
-                    evaluator.record_training_reward(score)
+                print(
+                    f"[Train] Episode {episode+1} | Task: {task_id} | Step {step_count+1} "
+                    f"| Reward: {reward:.3f} | Env: {columns['env_score']:.3f} "
+                    f"| Pred: {action.get('clause_type')}"
+                )
+
+                # 3e. MATHEMATICAL WEIGHT UPDATE (The actual learning happens here!)
+                agent.update_model(log_probs, reward)
+                evaluator.record_training_reward(reward)
+                evaluator.record_training_step(
+                    {
+                        "episode": episode + 1,
+                        "task_id": task_id,
+                        "step": step_count + 1,
+                        **columns,
+                    }
+                )
+
+                if (step_count + 1) % max(config.inspect_every_n_steps, 1) == 0:
+                    print(
+                        "[Inspect] "
+                        f"schema={columns['schema_valid']} "
+                        f"taxonomy={columns['taxonomy_valid']} "
+                        f"process={columns['process_valid']} "
+                        f"suspicious_steps={state.suspicious_step_count}"
+                    )
+
+                if state.suspicious_step_count >= config.warn_if_suspicious_steps:
+                    print(
+                        "[Warning] Repeated suspicious behavior detected. "
+                        "Consider reducing temperature or tightening verifier checks."
+                    )
+
+                if force_stop:
+                    print(
+                        "[Safety] Stopping episode early due to repeated identical actions."
+                    )
+                    done = True
 
                 step_count += 1
 

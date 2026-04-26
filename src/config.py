@@ -56,6 +56,26 @@ class RLConfig:
     max_steps_per_episode: int = 10
     total_training_episodes: int = 2  # Keep this low for testing
 
+    # Reward shaping and verification (RLVR-style)
+    reward_env_weight: float = float(os.getenv("REWARD_ENV_WEIGHT", "1.0"))
+    reward_schema_bonus: float = float(os.getenv("REWARD_SCHEMA_BONUS", "0.1"))
+    reward_taxonomy_bonus: float = float(os.getenv("REWARD_TAXONOMY_BONUS", "0.1"))
+    reward_process_bonus: float = float(os.getenv("REWARD_PROCESS_BONUS", "0.1"))
+    reward_repeat_penalty: float = float(os.getenv("REWARD_REPEAT_PENALTY", "0.2"))
+    reward_drift_penalty: float = float(os.getenv("REWARD_DRIFT_PENALTY", "0.15"))
+    reward_min: float = float(os.getenv("REWARD_MIN", "-5.0"))
+    reward_max: float = float(os.getenv("REWARD_MAX", "5.0"))
+
+    # Process checks and anti-hacking safety limits
+    min_reasoning_chars: int = int(os.getenv("MIN_REASONING_CHARS", "20"))
+    max_reasoning_chars: int = int(os.getenv("MAX_REASONING_CHARS", "600"))
+    repeated_action_soft_limit: int = int(os.getenv("REPEATED_ACTION_SOFT_LIMIT", "2"))
+    repeated_action_hard_limit: int = int(os.getenv("REPEATED_ACTION_HARD_LIMIT", "4"))
+
+    # Monitoring and inspection
+    inspect_every_n_steps: int = int(os.getenv("INSPECT_EVERY_N_STEPS", "5"))
+    warn_if_suspicious_steps: int = int(os.getenv("WARN_IF_SUSPICIOUS_STEPS", "3"))
+
     # Reproducibility
     seed: int = int(os.getenv("SEED", "42"))
 

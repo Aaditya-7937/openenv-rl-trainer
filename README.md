@@ -13,6 +13,11 @@ pinned: false
 
 This folder contains a fully modular, PyTorch-first Reinforcement Learning (RL) training pipeline for the OpenEnv Contract Review benchmark.
 
+It is now set up as an RLVR-style pipeline (Reinforcement Learning with Verifiable Rewards):
+- reward is not only one scalar from the environment,
+- a local verifier adds independent checks (schema, taxonomy, process quality),
+- anti-hacking penalties discourage degenerate repeated outputs.
+
 ## Architecture
 
 The project is structured using clean Software Design Principles (Separation of Concerns, Dependency Injection, Modularity).
@@ -24,6 +29,7 @@ The project is structured using clean Software Design Principles (Separation of 
 - \`src/env_client.py\`: Handles HTTP communication with the Hugging Face space.
 - \`src/agent.py\`: The AI Agent containing the LLM, tokenization, and RL optimization logic (Policy Gradient).
 - \`src/evaluation.py\`: Logic for running blind evaluations, collecting metrics, and plotting graphs.
+- \`src/rewarding.py\`: Verifier-style composed reward logic and anti-hacking safeguards.
 
 ## How to Run
 
@@ -62,3 +68,57 @@ The project is structured using clean Software Design Principles (Separation of 
 - Trains the model on the easy and medium tasks using a trial-and-error Policy Gradient update (updating the neural network weights based on the reward score).
 - Evaluates the "trained" model on the hard task again.
 - Generates a graph (\`training_results.png\`) comparing performance!
+
+## Hackathon-Aligned Workflow
+
+Use this order to stay aligned with OpenEnv RL best practices:
+
+1. Pick a task with objective verification
+- Step-by-step agent behavior should be possible.
+- Success must be programmatically checkable.
+- Difficulty should allow non-zero success probability.
+
+2. Stabilize environment before scaling
+- Confirm `reset` and `step` behavior.
+- Confirm done/timeout behavior.
+- Confirm local and remote runs both work.
+
+3. Train with verifier-first rewards
+- This repo uses independent reward columns:
+   - environment score,
+   - schema validity,
+   - taxonomy validity,
+   - process validity,
+   - repeated-action and drift penalties.
+
+4. Monitor more than one scalar
+- Watch overall reward and component means.
+- Inspect suspicious behavior warnings in logs.
+- Sample model generations periodically.
+
+5. Scale only after reward quality is stable
+- Increase episodes, batching, or task diversity only after verifier metrics are healthy.
+
+## Reward Hacking Defenses Included
+
+- Multiple independent reward functions (outcome + process checks).
+- Repeated identical action penalties.
+- Drift penalty when clause changes but action does not.
+- Early episode stop when repeated action behavior exceeds hard threshold.
+- Configurable inspection cadence and suspicious-step warnings.
+
+## Key Environment Variables
+
+- `REWARD_ENV_WEIGHT`, `REWARD_SCHEMA_BONUS`, `REWARD_TAXONOMY_BONUS`, `REWARD_PROCESS_BONUS`
+- `REWARD_REPEAT_PENALTY`, `REWARD_DRIFT_PENALTY`
+- `REWARD_MIN`, `REWARD_MAX`
+- `MIN_REASONING_CHARS`, `MAX_REASONING_CHARS`
+- `REPEATED_ACTION_SOFT_LIMIT`, `REPEATED_ACTION_HARD_LIMIT`
+- `INSPECT_EVERY_N_STEPS`, `WARN_IF_SUSPICIOUS_STEPS`
+- `OPENENV_TIMEOUT_SECONDS`
+
+## SFT vs RL Rule of Thumb
+
+- Plenty of high-quality traces available: start with SFT.
+- Little/no trace data but strong verifier available: use RL/RLVR.
+- Best practical path: light SFT warm start, then RL improvement.
