@@ -43,8 +43,8 @@ class RLConfig:
         "SPACE_API_URL", "https://kamal1425-openenv.hf.space"
     )
 
-    # Model Settings (Using a highly capable 7B model that fits on single L4 24GB with LoRA)
-    model_name: str = "Qwen/Qwen2.5-7B-Instruct"
+    # Model Settings
+    model_name: str = "deepseek-ai/DeepSeek-V4-Flash"
 
     # Training Hyperparameters
     learning_rate: float = 1e-5
