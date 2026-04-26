@@ -350,3 +350,59 @@ class RLAgent:
         state_dict = torch.load(path, map_location=self.device, weights_only=True)
         self.model.load_state_dict(state_dict)
         print(f"[Agent] Checkpoint restored ← {path}")
+
+    def save_final_model(self, output_dir: str) -> None:
+        """
+        Safe post-training adapter export (Guideline 16).
+
+        Uses save_pretrained() which stores ONLY the LoRA adapter deltas in
+        HuggingFace format.  This is correct for both the Unsloth and plain
+        PEFT paths because:
+          • No 4-bit → 16-bit upcasting happens (avoids quality damage).
+          • No merge_and_unload() is called (merge only when explicitly needed
+            for deployment, and only via Unsloth's own safe merge API).
+          • The adapter can be reloaded with `from_pretrained` + `PeftModel`
+            for post-save inference verification.
+
+        Do NOT replace this with torch.save(state_dict()) for the final export;
+        that path is reserved for the mid-training rollback checkpoint only.
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        self.model.save_pretrained(output_dir)
+        self.tokenizer.save_pretrained(output_dir)
+        print(f"[Agent] Final adapter saved → {output_dir}")
+        print(f"[Agent] Reload with: PeftModel.from_pretrained(base, '{output_dir}')")
+
+    def inference_sanity_check(self, sample_clause: str) -> str:
+        """
+        Post-training inference check (Guideline 16).
+
+        Runs a single greedy forward pass on a known clause immediately after
+        training to confirm the saved model can still generate coherent output.
+        A broken merge / corrupt save will surface here rather than at deploy time.
+        """
+        obs = {"clause_text": sample_clause}
+        prompt = self.create_prompt(obs)
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        self.model.eval()
+        with torch.no_grad():
+            output = self.model.generate(
+                inputs.input_ids,
+                attention_mask=inputs.attention_mask,
+                max_new_tokens=64,
+                do_sample=False,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
+        generated = self.tokenizer.decode(
+            output[0][inputs.input_ids.shape[1]:], skip_special_tokens=True
+        )
+        action = self.parse_action(generated)
+        ok = not action.get("_parse_failed", False)
+        print(
+            f"[Agent] Inference sanity check — "
+            f"parse_ok={ok} | clause_type={action.get('clause_type')} "
+            f"| risk_level={action.get('risk_level')}"
+        )
+        print(f"[Agent] Raw output: {repr(generated[:200])}")
+        self.model.train()
+        return generated

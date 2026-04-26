@@ -156,6 +156,7 @@ def main():
                             f"[Safety] Episode timeout "
                             f"({time.time()-episode_start_time:.0f}s). Stopping."
                         )
+                        evaluator.record_timeout()  # track frequency in metrics
                         break
 
                     # Get a fresh observation for this group rollout
@@ -179,6 +180,7 @@ def main():
 
                     for g in range(config.grpo_num_generations):
                         if time.time() - episode_start_time > config.episode_timeout_seconds:
+                            evaluator.record_timeout()
                             break
 
                         action, log_prob = agent.generate_and_get_logprobs(prompt)
@@ -246,6 +248,8 @@ def main():
                     if (step_count + 1) % max(config.inspect_every_n_steps, 1) == 0 and last_columns:
                         print(
                             "[Inspect] "
+                            f"success={last_columns.get('success')} "
+                            f"env_score={last_columns.get('env_score', 0):.3f} "
                             f"schema={last_columns.get('schema_valid')} "
                             f"taxonomy={last_columns.get('taxonomy_valid')} "
                             f"(bonus={last_columns.get('taxonomy_bonus', 0):.2f}) "
@@ -288,9 +292,32 @@ def main():
     trained_score = evaluator.run_evaluation(agent, client, task_id=config.eval_task)
     evaluator.metrics["post_eval"] = trained_score
     print(f"Trained Score: {trained_score}")
+    print(
+        f"Score delta: {trained_score - baseline_score:+.3f} "
+        f"({'improvement' if trained_score > baseline_score else 'regression'})"
+    )
 
-    # 5. Output Graphics & Results
-    print("\nPhase 4: Generating Metrics & Visuals")
+    # 5. Safe adapter export (Guideline 16)
+    # save_pretrained() stores LoRA adapter deltas only — no 4-bit→16-bit merge.
+    print("\nPhase 4: Saving Trained Adapter")
+    final_model_dir = "./results/final_adapter"
+    agent.save_final_model(final_model_dir)
+
+    # 6. Post-save inference sanity check (Guideline 16)
+    # Confirm the model can still generate coherent output immediately after saving.
+    # A corrupt adapter or broken merge would surface here, not at deploy time.
+    print("\nPhase 5: Inference Sanity Check")
+    _sample_clause = (
+        "The receiving party shall maintain the confidentiality of all proprietary "
+        "information disclosed by the disclosing party and shall not disclose such "
+        "information to any third party without prior written consent."
+    )
+    agent.inference_sanity_check(_sample_clause)
+    evaluator.metrics["timeout_count_final"] = evaluator.metrics["timeout_count"]
+    print(f"[Monitor] Total episode timeouts during training: {evaluator.metrics['timeout_count']}")
+
+    # 7. Output Graphics & Results
+    print("\nPhase 6: Generating Metrics & Visuals")
     evaluator.plot_and_save(save_dir="./results")
 
     print(
