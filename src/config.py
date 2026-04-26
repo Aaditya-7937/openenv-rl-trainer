@@ -44,7 +44,7 @@ class RLConfig:
     )
 
     # Model Settings
-    model_name: str = "deepseek-ai/DeepSeek-V4-Flash"
+    model_name: str = "google/gemma-4-26B-A4B-it"
 
     # Training Hyperparameters
     learning_rate: float = 1e-5
@@ -53,7 +53,7 @@ class RLConfig:
     eval_task: str = "task_3_hard"
 
     # Episode/Step limits
-    max_steps_per_episode: int = 10
+    max_steps_per_episode: int = 50
     total_training_episodes: int = 20  # Keep this low for testing
 
     # Reward shaping and verification (RLVR-style)
