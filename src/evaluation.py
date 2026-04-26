@@ -47,7 +47,10 @@ class Evaluator:
         self.metrics["reward_columns_mean"] = summary
 
     def run_evaluation(self, agent, env_client, task_id: str) -> float:
-        """Runs the model on the environment without updating weights."""
+        """
+        Runs the model on the environment without updating weights.
+        Properly navigates: classify → next_clause → ... → complete_review.
+        """
         print(f"\n--- Running Blind Evaluation on {task_id} ---")
 
         # Tell PyTorch NOT to track gradients (This prevents learning/overfitting)
@@ -58,18 +61,15 @@ class Evaluator:
         try:
             with torch.no_grad():
                 obs = env_client.reset(task_id)
-                done = False
+                total_clauses = obs.get("total_clauses", 1)
                 total_reward = 0.0
 
-                while not done:
+                for clause_idx in range(total_clauses):
                     clause = obs.get("clause_text", "")
                     if not clause:
-                        resp = env_client.step({"action_type": "complete_review"})
-                        done = resp.get("done", True)
-                        score = resp.get("reward", {}).get("score", 0.0)
-                        total_reward += score
                         break
 
+                    # Generate and parse action
                     prompt = agent.create_prompt(obs)
                     inputs = agent.tokenizer(prompt, return_tensors="pt").to(
                         agent.device
@@ -92,21 +92,59 @@ class Evaluator:
                     )
 
                     generated_text = agent.tokenizer.decode(
-                        output[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
+                        output[0][inputs.input_ids.shape[1] :],
+                        skip_special_tokens=True,
                     )
                     action = agent.parse_action(generated_text)
 
-                    result = env_client.step(action)
-                    obs = result.get("observation", {})
-                    score = result.get("reward", {}).get("score", 0.0)
-                    done = result.get("done", False)
-
+                    # Send classify action
+                    classify_result = env_client.step(action)
+                    reward_obj = classify_result.get("reward", {})
+                    if isinstance(reward_obj, dict):
+                        score = reward_obj.get("score", 0.0)
+                    else:
+                        score = float(reward_obj) if reward_obj else 0.0
                     total_reward += score
-                    print(f"Eval Clause Score: {score}")
+
+                    print(
+                        f"  Eval Clause {clause_idx+1}/{total_clauses}: "
+                        f"type={action.get('clause_type')} | "
+                        f"risk={action.get('risk_level')} | "
+                        f"score={score:.3f}"
+                    )
+
+                    if classify_result.get("done", False):
+                        break
+
+                    # Navigate to next clause or complete review
+                    if clause_idx < total_clauses - 1:
+                        next_result = env_client.step(
+                            {"action_type": "next_clause"}
+                        )
+                        obs = next_result.get("observation", {})
+                        if next_result.get("done", False):
+                            break
+                    else:
+                        # All clauses classified — complete the review
+                        complete_result = env_client.step(
+                            {"action_type": "complete_review"}
+                        )
+                        final_reward_obj = complete_result.get("reward", {})
+                        if isinstance(final_reward_obj, dict):
+                            final_score = final_reward_obj.get("score", 0.0)
+                        else:
+                            final_score = (
+                                float(final_reward_obj) if final_reward_obj else 0.0
+                            )
+                        total_reward += final_score
+                        print(
+                            f"  [Complete] Final review score: {final_score:.4f}"
+                        )
         finally:
             if was_training:
                 agent.model.train()
 
+        print(f"  Total eval reward: {total_reward:.4f}")
         return total_reward
 
     def plot_and_save(self, save_dir: str = "."):

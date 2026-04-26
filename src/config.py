@@ -54,7 +54,7 @@ class RLConfig:
 
     # Episode/Step limits
     max_steps_per_episode: int = 50
-    total_training_episodes: int = 20  # Keep this low for testing
+    total_training_episodes: int = 50
 
     # Reward shaping and verification (RLVR-style)
     reward_env_weight: float = float(os.getenv("REWARD_ENV_WEIGHT", "0.6"))
@@ -80,7 +80,7 @@ class RLConfig:
     seed: int = int(os.getenv("SEED", "42"))
 
     # Generation settings
-    max_new_tokens: int = int(os.getenv("MAX_NEW_TOKENS", "128"))
+    max_new_tokens: int = int(os.getenv("MAX_NEW_TOKENS", "256"))
     train_do_sample: bool = _env_bool("TRAIN_DO_SAMPLE", True)
     eval_do_sample: bool = _env_bool("EVAL_DO_SAMPLE", False)
     train_temperature: float = float(os.getenv("TRAIN_TEMPERATURE", "0.7"))

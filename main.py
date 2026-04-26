@@ -1,8 +1,6 @@
 import os
 import random
 import torch
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 from src.config import RLConfig
 from src.env_client import EnvironmentClient
@@ -11,97 +9,111 @@ from src.evaluation import Evaluator
 from src.rewarding import RewardComposer, EpisodeState
 
 
-def process_task(task_id, episode, config, agent, reward_composer, evaluator, agent_lock):
-    # Use a separate client for each parallel task to avoid session state clobbering
+def process_task(task_id, episode, config, agent, reward_composer, evaluator):
+    """
+    Process a single task episode with proper clause navigation:
+      classify → next_clause → classify → ... → complete_review
+    """
     client = EnvironmentClient(api_url=config.api_url, api_key=config.env_api_key)
     obs = client.reset(task_id)
-    done = False
+
+    total_clauses = obs.get("total_clauses", 1)
     step_count = 0
     state = EpisodeState()
+    episode_rewards = []
 
-    while not done and step_count < config.max_steps_per_episode:
-        clause = obs.get("clause_text", "")
-        if not clause:
-            client.step({"action_type": "complete_review"})
+    for clause_idx in range(total_clauses):
+        if step_count >= config.max_steps_per_episode:
+            print(f"  [Limit] Max steps ({config.max_steps_per_episode}) reached.")
             break
 
-        # 3a. LLM analyzes the text
+        clause = obs.get("clause_text", "")
+        if not clause:
+            # No clause text means we should complete the review
+            break
+
+        # --- 1. LLM generates a classification for the current clause ---
         prompt = agent.create_prompt(obs)
         current_obs = dict(obs)
+        action, log_probs, generated_text = agent.generate_and_get_logprobs(prompt)
 
-        # 3b. LLM generates action dict AND we calculate token probabilties for gradient math
-        with agent_lock:
-            action, log_probs, generated_text = agent.generate_and_get_logprobs(prompt)
+        # --- 2. Send the classify action to the environment ---
+        classify_result = client.step(action)
+        classify_obs = classify_result.get("observation", {})
+        classify_done = classify_result.get("done", False)
 
-        # 3c. Send action to OpenEnv and receive reward (This happens in parallel!)
-        result = client.step(action)
-        obs = result.get("observation", {})
-        done = result.get("done", False)
-
-        # 3d. Compose reward from independent checks (outcome + process + safety)
+        # --- 3. Compose the reward from independent checks ---
         reward, columns, force_stop = reward_composer.compose(
             action=action,
-            env_result=result,
+            env_result=classify_result,
             state=state,
             observation=current_obs,
         )
+        episode_rewards.append(reward)
 
-        with agent_lock:
-            print(
-                f"\n[Train] Episode {episode+1} | Task: {task_id} | Step {step_count+1}"
-            )
-            print(f"--- Prompt Sample ---\n{prompt[:150]}...\n---------------------")
-            print(f"--- Output Sample ---\n{generated_text}\n---------------------")
-            print(
-                f"| Reward: {reward:.3f} | Env: {columns['env_score']:.3f} "
-                f"| Pred: {action.get('clause_type')}"
-            )
+        # --- 4. Print step details ---
+        print(
+            f"  Clause {clause_idx+1}/{total_clauses} | "
+            f"type={action.get('clause_type')} | "
+            f"risk={action.get('risk_level')} | "
+            f"action={action.get('suggested_action')} | "
+            f"reward={reward:.3f} (env={columns['env_score']:.3f})"
+        )
 
-            # 3e. MATHEMATICAL WEIGHT UPDATE (The actual learning happens here!)
-            agent.update_model(log_probs, reward)
-            evaluator.record_training_reward(reward)
-            evaluator.record_training_step(
-                {
-                    "episode": episode + 1,
-                    "task_id": task_id,
-                    "step": step_count + 1,
-                    **columns,
-                }
-            )
-
-        if (step_count + 1) % max(config.inspect_every_n_steps, 1) == 0:
-            with agent_lock:
-                print(
-                    "[Inspect] "
-                    f"schema={columns['schema_valid']} "
-                    f"taxonomy={columns['taxonomy_valid']} "
-                    f"process={columns['process_valid']} "
-                    f"suspicious_steps={state.suspicious_step_count}"
-                )
-
-        if state.suspicious_step_count >= config.warn_if_suspicious_steps:
-            with agent_lock:
-                print(
-                    "[Warning] Repeated suspicious behavior detected. "
-                    "Consider reducing temperature or tightening verifier checks."
-                )
-
-        if force_stop:
-            with agent_lock:
-                print(
-                    "[Safety] Stopping episode early due to repeated identical actions."
-                )
-            done = True
+        # --- 5. Update model weights (REINFORCE) ---
+        agent.update_model(log_probs, reward)
+        evaluator.record_training_reward(reward)
+        evaluator.record_training_step(
+            {
+                "episode": episode + 1,
+                "task_id": task_id,
+                "clause_index": clause_idx,
+                "step": step_count + 1,
+                **columns,
+            }
+        )
 
         step_count += 1
+
+        if force_stop:
+            print("  [Safety] Stopping episode early due to repeated identical actions.")
+            break
+
+        if classify_done:
+            break
+
+        # --- 6. Navigate to next clause or complete the review ---
+        if clause_idx < total_clauses - 1:
+            # Advance to the next clause
+            next_result = client.step({"action_type": "next_clause"})
+            obs = next_result.get("observation", {})
+            if next_result.get("done", False):
+                break
+        else:
+            # All clauses classified — complete the review
+            complete_result = client.step({"action_type": "complete_review"})
+            final_reward_obj = complete_result.get("reward", {})
+            final_score = (
+                final_reward_obj.get("score", 0.0)
+                if isinstance(final_reward_obj, dict)
+                else float(final_reward_obj or 0.0)
+            )
+            print(f"  [Complete] Final grader score for {task_id}: {final_score:.4f}")
+
+    avg_reward = sum(episode_rewards) / max(len(episode_rewards), 1)
+    print(f"  Episode avg reward: {avg_reward:.3f} over {len(episode_rewards)} steps")
 
 
 def main():
     # 1. Load configuration and initialize components.
-    # Use the .env file explicitly located in the current folder (openenv_rl_trainer)
+    # Try loading .env from this directory first, then fallback to openev directory
     env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     if os.path.exists(env_path):
         load_dotenv(env_path)
+    # Also load from the openev workspace if available (for shared secrets)
+    openev_env = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "openev", ".env")
+    if os.path.exists(openev_env):
+        load_dotenv(openev_env, override=False)
     config = RLConfig()
 
     # Reproducibility for easier debugging and fair pre/post comparisons.
@@ -120,6 +132,10 @@ def main():
     print(f"Model: {config.model_name}")
     print(f"Device: {agent.device}")
     print(f"Seed: {config.seed}")
+    print(f"Max new tokens: {config.max_new_tokens}")
+    print(f"Training episodes: {config.total_training_episodes}")
+    print(f"Train tasks: {config.train_tasks}")
+    print(f"Eval task: {config.eval_task}")
     print(
         "Reward Weights: "
         f"env={config.reward_env_weight}, "
@@ -129,27 +145,27 @@ def main():
     )
     print("=" * 60)
 
-    # 2. Pre-Training Evaluation: Test untrainned model on 'hard' task
+    # 2. Pre-Training Evaluation: Test untrained model on 'hard' task
     print("\nPhase 1: Baseline Evaluation (Testing the out-of-the-box model)")
     baseline_score = evaluator.run_evaluation(agent, client, task_id=config.eval_task)
     evaluator.metrics["pre_eval"] = baseline_score
     print(f"Baseline Score: {baseline_score}")
 
-    # 3. Training Loop: Let the model practice on easy/medium tasks and update weights mathematically
-    print("\nPhase 2: Reinforcement Learning (PPO/REINFORCE mechanism) with Parallel Processing")
-    agent_lock = threading.Lock()
-
+    # 3. Training Loop: Sequential processing with proper clause navigation
+    print("\nPhase 2: Reinforcement Learning (REINFORCE)")
     for episode in range(config.total_training_episodes):
-        with ThreadPoolExecutor(max_workers=max(4, len(config.train_tasks))) as executor:
-            futures = [
-                executor.submit(process_task, task_id, episode, config, agent, reward_composer, evaluator, agent_lock)
-                for task_id in config.train_tasks
-            ]
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f"Task failed: {e}")
+        print(f"\n{'─'*50}")
+        print(f"Episode {episode+1}/{config.total_training_episodes}")
+        print(f"{'─'*50}")
+
+        for task_id in config.train_tasks:
+            print(f"\n[Train] Task: {task_id}")
+            try:
+                process_task(
+                    task_id, episode, config, agent, reward_composer, evaluator
+                )
+            except Exception as e:
+                print(f"  [Error] Task {task_id} failed: {e}")
 
     # 4. Post-Training Evaluation: Test trained model on 'hard' task again
     print("\nPhase 3: Post-Training Blind Evaluation")
