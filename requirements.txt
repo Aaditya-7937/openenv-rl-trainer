@@ -1,10 +1,9 @@
-# ── CUDA-enabled PyTorch (CPU-only torch from PyPI will break Unsloth+TRL) ──
-# Space runs CUDA 12.3 — use cu121 (compiled for CUDA 12.1, runs on 12.3 drivers).
-# Rule: wheel CUDA version must be <= driver CUDA version.
---extra-index-url https://download.pytorch.org/whl/cu121
-torch==2.6.0
-torchvision
-torchaudio
+# ── PyTorch ──────────────────────────────────────────────────────────────────
+# DO NOT pin torch here.
+# The HuggingFace Unsloth Space image pre-installs torch 2.11.0+cu130 (CUDA-enabled).
+# Pinning a lower version (e.g. 2.6.0) DOWNGRADES torch and breaks torchao,
+# which requires torch.utils._pytree.register_constant (added in torch 2.7.0).
+# Let the container own its torch version.
 
 # ── Core training stack ──────────────────────────────────────────────────────
 transformers>=4.40.0
