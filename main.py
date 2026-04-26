@@ -12,15 +12,16 @@ from src.rewarding import RewardComposer, EpisodeState
 
 def process_task(task_id, episode, config, agent, reward_composer, evaluator):
     """
-    Process a single task episode with proper clause navigation:
-      classify → next_clause → classify → ... → complete_review
+    Process a single task episode using GRPO:
+    For each clause, generate G candidate answers, score them all,
+    use group-relative advantages to update the policy, then
+    send the BEST candidate to the environment.
     """
     client = EnvironmentClient(api_url=config.api_url, api_key=config.env_api_key)
     obs = client.reset(task_id)
 
     total_clauses = obs.get("total_clauses", 1)
     step_count = 0
-    state = EpisodeState()
     episode_rewards = []
 
     for clause_idx in range(total_clauses):
@@ -30,75 +31,97 @@ def process_task(task_id, episode, config, agent, reward_composer, evaluator):
 
         clause = obs.get("clause_text", "")
         if not clause:
-            # No clause text means we should complete the review
             break
 
-        # --- 1. LLM generates a classification for the current clause ---
+        # --- 1. Generate G candidate responses for this clause ---
         prompt = agent.create_prompt(obs)
         current_obs = dict(obs)
-        action, log_probs, generated_text = agent.generate_and_get_logprobs(prompt)
+        candidates = agent.generate_group(prompt)
+        G = len(candidates)
 
-        # --- 2. Send the classify action to the environment ---
-        classify_result = client.step(action)
+        # --- 2. Score each candidate with the reward composer ---
+        #   We create independent EpisodeState per candidate to avoid cross-contamination
+        rewards = []
+        all_columns = []
+        for action, text in candidates:
+            state = EpisodeState()  # fresh state per candidate for fair scoring
+            reward, columns, _ = reward_composer.compose(
+                action=action,
+                env_result={"reward": {"score": 0.0}},  # placeholder; we'll get real score for best
+                state=state,
+                observation=current_obs,
+            )
+            rewards.append(reward)
+            all_columns.append(columns)
+
+        # --- 3. Pick the best candidate ---
+        best_idx = rewards.index(max(rewards))
+        best_action, best_text = candidates[best_idx]
+
+        # --- 4. Send the best candidate to the REAL environment ---
+        classify_result = client.step(best_action)
         classify_obs = classify_result.get("observation", {})
         classify_done = classify_result.get("done", False)
 
-        # --- 3. Compose the reward from independent checks ---
-        reward, columns, force_stop = reward_composer.compose(
-            action=action,
+        # Re-score the best candidate with the real env reward
+        best_state = EpisodeState()
+        real_reward, real_columns, force_stop = reward_composer.compose(
+            action=best_action,
             env_result=classify_result,
-            state=state,
+            state=best_state,
             observation=current_obs,
         )
-        episode_rewards.append(reward)
+        # Update the best candidate's reward with the real env score
+        rewards[best_idx] = real_reward
 
-        # --- 4. Print step details ---
-        # Show raw generation so we can diagnose parse failures / mode collapse
-        gen_preview = generated_text[:200].replace('\n', ' ').strip()
-        print(
-            f"  Clause {clause_idx+1}/{total_clauses} | "
-            f"type={action.get('clause_type')} | "
-            f"risk={action.get('risk_level')} | "
-            f"action={action.get('suggested_action')} | "
-            f"reward={reward:.3f} (env={columns['env_score']:.3f})"
-        )
-        print(f"    Raw: {gen_preview}")
-        # Show env corrective feedback if any
-        env_feedback = classify_obs.get("corrective_feedback", "")
-        if env_feedback:
-            print(f"    Feedback: {env_feedback[:150]}")
+        # --- 5. GRPO update: learn from the group's relative quality ---
+        grpo_info = agent.grpo_update(prompt, candidates, rewards)
 
-        # --- 5. Update model weights (REINFORCE) ---
-        agent.update_model(log_probs, reward)
-        evaluator.record_training_reward(reward)
+        episode_rewards.append(real_reward)
+        evaluator.record_training_reward(real_reward)
         evaluator.record_training_step(
             {
                 "episode": episode + 1,
                 "task_id": task_id,
                 "clause_index": clause_idx,
                 "step": step_count + 1,
-                **columns,
+                **real_columns,
             }
         )
 
+        # --- 6. Print step details ---
+        gen_preview = best_text[:150].replace('\n', ' ').strip()
+        print(
+            f"  Clause {clause_idx+1}/{total_clauses} | "
+            f"type={best_action.get('clause_type')} | "
+            f"risk={best_action.get('risk_level')} | "
+            f"reward={real_reward:.3f} (env={real_columns['env_score']:.3f}) | "
+            f"GRPO[G={G} mean={grpo_info['mean_reward']:.3f} "
+            f"std={grpo_info['std_reward']:.3f} "
+            f"best={grpo_info['best_reward']:.3f} "
+            f"worst={grpo_info['worst_reward']:.3f}]"
+        )
+        print(f"    Best: {gen_preview}")
+        env_feedback = classify_obs.get("corrective_feedback", "")
+        if env_feedback:
+            print(f"    Feedback: {env_feedback[:150]}")
+
+        # Show what the OTHER candidates predicted (diversity check)
+        other_types = [c[0].get('clause_type') for i, c in enumerate(candidates) if i != best_idx]
+        print(f"    Other candidates: {other_types}")
+
         step_count += 1
 
-        if force_stop:
-            print("  [Safety] Stopping episode early due to repeated identical actions.")
+        if force_stop or classify_done:
             break
 
-        if classify_done:
-            break
-
-        # --- 6. Navigate to next clause or complete the review ---
+        # --- 7. Navigate to next clause or complete review ---
         if clause_idx < total_clauses - 1:
-            # Advance to the next clause
             next_result = client.step({"action_type": "next_clause"})
             obs = next_result.get("observation", {})
             if next_result.get("done", False):
                 break
         else:
-            # All clauses classified — complete the review
             complete_result = client.step({"action_type": "complete_review"})
             final_reward_obj = complete_result.get("reward", {})
             final_score = (
@@ -110,6 +133,16 @@ def process_task(task_id, episode, config, agent, reward_composer, evaluator):
 
     avg_reward = sum(episode_rewards) / max(len(episode_rewards), 1)
     print(f"  Episode avg reward: {avg_reward:.3f} over {len(episode_rewards)} steps")
+
+
+def _check_gpu_environment():
+    """Quick GPU diagnostic printed before any model loading."""
+    import torch
+    if torch.cuda.is_available():
+        print(f"[GPU] CUDA available: {torch.cuda.get_device_name(0)}")
+        print(f"[GPU] VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB")
+    else:
+        print("[GPU] WARNING: No CUDA device found. Running on CPU (will be very slow).")
 
 
 def main():

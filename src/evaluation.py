@@ -94,7 +94,7 @@ class Evaluator:
                     }
                     if agent.config.eval_do_sample:
                         generation_kwargs["temperature"] = (
-                            agent.config.eval_temperature
+                            agent.config.train_temperature
                         )
 
                     output = agent.model.generate(

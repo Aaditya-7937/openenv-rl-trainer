@@ -291,12 +291,146 @@ class RLAgent:
             return normalized
         return None
 
+    def generate_group(
+        self, prompt: str
+    ) -> List[Tuple[Dict[str, Any], str]]:
+        """
+        Generate G candidate completions for one prompt (the GRPO 'group').
+        Returns list of (action_dict, generated_text) tuples.
+        """
+        G = self.config.grpo_group_size
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        input_ids = inputs.input_ids
+        attention_mask = inputs.attention_mask
+
+        generation_kwargs = {
+            "max_new_tokens": self.config.max_new_tokens,
+            "do_sample": True,
+            "temperature": self.config.train_temperature,
+            "num_return_sequences": G,
+            "pad_token_id": self.tokenizer.pad_token_id,
+        }
+
+        # Generate in eval mode (gradient checkpointing corrupts generation)
+        self.model.eval()
+        with torch.no_grad():
+            outputs = self.model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                **generation_kwargs,
+            )
+
+        prompt_length = input_ids.shape[1]
+        candidates = []
+        for i in range(G):
+            generated_tokens = outputs[i][prompt_length:]
+            text = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+            action = self.parse_action(text)
+            candidates.append((action, text))
+
+        return candidates
+
+    def grpo_update(
+        self, prompt: str, candidates: List[Tuple[Dict[str, Any], str]],
+        rewards: List[float]
+    ) -> Dict[str, float]:
+        """
+        GRPO policy update: compute group-normalised advantages and update weights.
+
+        Key insight: even when all candidates get the same env score,
+        differences in risk_level, suggested_action, and reasoning quality
+        create reward variance through the reward composer. The group
+        normalisation turns these small differences into meaningful gradients.
+
+        Returns dict with debug info (mean_reward, std_reward, best_reward, etc.)
+        """
+        G = len(candidates)
+        rewards_t = torch.tensor(rewards, dtype=torch.float32)
+
+        # Group-relative advantage normalisation (the core of GRPO)
+        mean_r = rewards_t.mean()
+        std_r = rewards_t.std()
+        if std_r < 1e-8:
+            # All rewards identical — still update via entropy bonus only
+            advantages = torch.zeros(G)
+        else:
+            advantages = (rewards_t - mean_r) / (std_r + 1e-8)
+
+        # Switch to train mode for the gradient computation
+        self.model.train()
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        input_ids = inputs.input_ids
+        prompt_length = input_ids.shape[1]
+
+        total_loss = torch.tensor(0.0, device=self.device)
+        valid_count = 0
+
+        for i, (action, text) in enumerate(candidates):
+            # Re-tokenize the full sequence (prompt + this candidate's output)
+            full_text = prompt + text
+            full_inputs = self.tokenizer(
+                full_text, return_tensors="pt", truncation=True
+            ).to(self.device)
+            full_ids = full_inputs.input_ids[0]
+            generated_tokens = full_ids[prompt_length:]
+
+            if len(generated_tokens) == 0:
+                continue
+
+            # Forward pass with gradients
+            full_attention_mask = torch.ones(1, len(full_ids), device=self.device)
+            outputs = self.model(
+                input_ids=full_ids.unsqueeze(0),
+                attention_mask=full_attention_mask,
+            )
+
+            logits = outputs.logits[0, prompt_length - 1: -1, :]
+            log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+
+            num_gen = min(len(generated_tokens), logits.shape[0])
+            token_log_probs = log_probs[:num_gen].gather(
+                dim=-1, index=generated_tokens[:num_gen].unsqueeze(-1)
+            ).squeeze(-1)
+            mean_log_prob = token_log_probs.sum() / num_gen
+
+            # Policy loss: -advantage * log_prob
+            adv = advantages[i].item()
+            policy_loss = -mean_log_prob * adv
+
+            # Entropy bonus (encourages exploration)
+            probs = torch.nn.functional.softmax(logits[:num_gen], dim=-1)
+            entropy = -(probs * log_probs[:num_gen]).sum(dim=-1).mean()
+
+            total_loss = total_loss + policy_loss - self.entropy_coeff * entropy
+            valid_count += 1
+
+        if valid_count > 0:
+            total_loss = total_loss / valid_count
+
+            if torch.isfinite(total_loss):
+                self.optimizer.zero_grad()
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.config.grad_clip_norm
+                )
+                self.optimizer.step()
+
+        return {
+            "mean_reward": mean_r.item(),
+            "std_reward": std_r.item(),
+            "best_reward": max(rewards),
+            "worst_reward": min(rewards),
+            "loss": total_loss.item() if torch.is_tensor(total_loss) else 0.0,
+        }
+
     def generate_and_get_logprobs(
         self, prompt: str
-    ) -> Tuple[Dict[str, Any], torch.Tensor, str]:
+    ) -> Tuple[Dict[str, Any], torch.Tensor]:
         """
-        Generate a text response while computing gradient-tracking log probabilities.
-        Returns (action_dict, log_prob, generated_text)
+        Generate a SINGLE text response and compute its log-probability.
+        Used by the fallback PyTorch-native GRPO loop in main.py.
+        Returns (action_dict, log_prob_tensor).
+        The action_dict includes '_parse_failed' and '_raw_generation' keys.
         """
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         input_ids = inputs.input_ids
@@ -304,15 +438,12 @@ class RLAgent:
 
         generation_kwargs = {
             "max_new_tokens": self.config.max_new_tokens,
-            "do_sample": self.config.train_do_sample,
+            "do_sample": True,
+            "temperature": self.config.train_temperature,
             "pad_token_id": self.tokenizer.pad_token_id,
         }
-        if self.config.train_do_sample:
-            generation_kwargs["temperature"] = self.config.train_temperature
 
-        # 1. Generate text in EVAL mode — gradient checkpointing in train mode
-        #    corrupts generation output (produces garbage tokens).
-        #    Proof: eval baseline = 1.85, train generation = gibberish.
+        # Generate in eval mode (gradient checkpointing corrupts generation)
         self.model.eval()
         with torch.no_grad():
             output = self.model.generate(
@@ -321,19 +452,24 @@ class RLAgent:
                 **generation_kwargs,
             )
 
-        # 2. Extract generated tokens
         full_sequence = output[0]
         prompt_length = input_ids.shape[1]
         generated_tokens = full_sequence[prompt_length:]
 
-        # Parse the plain text action
         generated_text = self.tokenizer.decode(
             generated_tokens, skip_special_tokens=True
         )
         action = self.parse_action(generated_text)
 
-        # 3. Switch to TRAIN mode for the forward pass that computes gradients.
-        #    This is the only place we need train mode — for backprop through log-probs.
+        # Annotate action with parse metadata for the GRPO loop
+        action["_raw_generation"] = generated_text
+        action["_parse_failed"] = (
+            action.get("clause_type") == "confidentiality"
+            and generated_text
+            and "<analysis>" not in generated_text
+        )
+
+        # Compute log-prob with gradients
         self.model.train()
         full_input_ids = full_sequence.unsqueeze(0)
         full_attention_mask = torch.ones_like(full_input_ids).to(self.device)
@@ -342,63 +478,123 @@ class RLAgent:
             input_ids=full_input_ids, attention_mask=full_attention_mask
         )
 
-        # 4. Extract logits specifically for the newly generated tokens
-        # The logits at index `i` predict the token at index `i+1`
-        logits = forward_outputs.logits[0, prompt_length - 1 : -1, :]
-
+        logits = forward_outputs.logits[0, prompt_length - 1: -1, :]
         num_generated = len(generated_tokens)
+
         if num_generated == 0:
-            return action, torch.tensor(0.0, device=self.device, requires_grad=True), generated_text
+            return action, torch.tensor(0.0, device=self.device, requires_grad=True)
 
-        # Calculate Log Probabilities WITH gradient tracking (grad_fn)
         log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-
-        # Gather the log prob of the specific token the model actually generated
         token_log_probs = log_probs.gather(
             dim=-1, index=generated_tokens.unsqueeze(-1)
         ).squeeze(-1)
-
-        # Use MEAN log-prob instead of SUM to normalize by sequence length.
-        # Without this, long outputs get massive log-probs that dominate
-        # the gradient and cause instability.
         mean_log_prob = token_log_probs.sum() / num_generated
 
-        # Calculate entropy bonus (encourages diverse token predictions)
-        # Higher entropy = model is less certain = more exploration
-        probs = torch.nn.functional.softmax(logits, dim=-1)
-        entropy = -(probs * log_probs).sum(dim=-1).mean()
-        self._last_entropy = entropy  # Save for use in update_model
+        return action, mean_log_prob
 
-        return action, mean_log_prob, generated_text
-
-    def update_model(self, log_prob: torch.Tensor, reward: float):
+    def compute_grpo_advantages(self, rewards: List[float]) -> torch.Tensor:
         """
-        Update the model weights using the REINFORCE policy gradient mechanism.
-        Formula: Loss = -log(pi(a|s)) * (Reward - Baseline) - entropy_coeff * H(pi)
+        Compute group-relative advantages for a batch of rewards.
+        A_i = (r_i - mean(r)) / (std(r) + eps)
+        """
+        rewards_t = torch.tensor(rewards, dtype=torch.float32)
+        mean_r = rewards_t.mean()
+        std_r = rewards_t.std()
+        if std_r < 1e-8:
+            return torch.zeros_like(rewards_t)
+        return (rewards_t - mean_r) / (std_r + 1e-8)
+
+    def update_model_grpo(
+        self, log_probs: List[torch.Tensor], advantages: torch.Tensor
+    ):
+        """
+        Update model weights using pre-computed log-probs and GRPO advantages.
+        Used by the fallback PyTorch-native GRPO loop in main.py.
         """
         self.optimizer.zero_grad()
+        total_loss = torch.tensor(0.0, device=self.device)
+        valid = 0
 
-        # Calculate advantage
-        advantage = reward - self.baseline
-        
-        # Update baseline (moving average)
-        self.baseline = (1 - self.baseline_alpha) * self.baseline + self.baseline_alpha * reward
+        for lp, adv in zip(log_probs, advantages):
+            if not torch.isfinite(lp):
+                continue
+            total_loss = total_loss + (-lp * adv.item())
+            valid += 1
 
-        # Negative sign, because PyTorch MINIMIZES loss, but we want to MAXIMIZE advantage.
-        advantage_t = torch.tensor(float(advantage), device=self.device, dtype=log_prob.dtype)
-        policy_loss = -log_prob * advantage_t
+        if valid > 0:
+            total_loss = total_loss / valid
+            if torch.isfinite(total_loss):
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.config.grad_clip_norm
+                )
+                self.optimizer.step()
 
-        # Add entropy bonus: subtract entropy to encourage exploration
-        # (we subtract because we MINIMIZE loss, and we WANT higher entropy)
-        entropy = getattr(self, '_last_entropy', torch.tensor(0.0, device=self.device))
-        loss = policy_loss - self.entropy_coeff * entropy
+    def save_checkpoint(self, path: str):
+        """Save LoRA adapter weights for rollback."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Save only the trainable (LoRA) parameters
+        trainable_state = {
+            k: v for k, v in self.model.state_dict().items() if v.requires_grad
+        }
+        if not trainable_state:
+            # Fallback: save all named params that require grad
+            trainable_state = {
+                n: p.data for n, p in self.model.named_parameters() if p.requires_grad
+            }
+        torch.save(trainable_state, path)
 
-        if not torch.isfinite(loss):
-            print(f"[Agent] Skipping non-finite loss: {loss.item()}")
+    def load_checkpoint(self, path: str):
+        """Restore LoRA adapter weights from checkpoint."""
+        if not os.path.exists(path):
+            print(f"[Agent] Checkpoint not found: {path}")
             return
+        state = torch.load(path, map_location=self.device)
+        missing, unexpected = self.model.load_state_dict(state, strict=False)
+        if missing:
+            print(f"[Agent] Checkpoint load — missing keys: {len(missing)}")
 
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            self.model.parameters(), self.config.grad_clip_norm
+    def save_final_model(self, output_dir: str):
+        """Save the final trained LoRA adapter."""
+        os.makedirs(output_dir, exist_ok=True)
+        try:
+            self.model.save_pretrained(output_dir)
+            self.tokenizer.save_pretrained(output_dir)
+            print(f"[Agent] Saved adapter to {output_dir}")
+        except Exception as e:
+            print(f"[Agent] save_pretrained failed: {e}")
+            # Fallback: save state dict
+            torch.save(
+                {n: p.data for n, p in self.model.named_parameters() if p.requires_grad},
+                os.path.join(output_dir, "adapter_state.pt"),
+            )
+            print(f"[Agent] Saved state dict fallback to {output_dir}/adapter_state.pt")
+
+    def inference_sanity_check(self, sample_clause: str):
+        """Quick check that the model can still generate after training."""
+        obs = {
+            "clause_text": sample_clause,
+            "contract_type": "Service Agreement",
+            "jurisdiction": "New York",
+            "parties": ["Party A", "Party B"],
+            "clause_index": 0,
+            "total_clauses": 1,
+        }
+        prompt = self.create_prompt(obs)
+        self.model.eval()
+        with torch.no_grad():
+            inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+            output = self.model.generate(
+                inputs.input_ids,
+                attention_mask=inputs.attention_mask,
+                max_new_tokens=self.config.max_new_tokens,
+                do_sample=False,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
+        text = self.tokenizer.decode(
+            output[0][inputs.input_ids.shape[1]:], skip_special_tokens=True
         )
-        self.optimizer.step()
+        action = self.parse_action(text)
+        print(f"[Sanity] clause_type={action['clause_type']} risk={action['risk_level']}")
+        print(f"[Sanity] Raw: {text[:200]}")
+
